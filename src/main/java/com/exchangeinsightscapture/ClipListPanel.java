@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.awt.Color;
 import java.awt.Component;
@@ -37,10 +37,10 @@ class ClipListPanel extends JPanel
 	private static final Color RED = new Color(94, 44, 44);
 	private static final int MAX_SHOWN = 25;
 
-	private final InstantReplayConfig config;
+	private final ExchangeInsightsCaptureConfig config;
 	private final Runnable onChanged;
 
-	ClipListPanel(InstantReplayConfig config, Runnable onChanged)
+	ClipListPanel(ExchangeInsightsCaptureConfig config, Runnable onChanged)
 	{
 		this.config = config;
 		this.onChanged = onChanged;

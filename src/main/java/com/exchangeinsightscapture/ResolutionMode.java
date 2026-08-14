@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 /**
  * Target vertical resolution for saved clips. Frames are downscaled to this

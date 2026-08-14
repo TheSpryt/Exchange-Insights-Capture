@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -25,7 +25,7 @@ final class ClipStorage
 	}
 
 	/** The configured save folder, or the default {@code .runelite/captures} when blank. */
-	static File outputDir(InstantReplayConfig config)
+	static File outputDir(ExchangeInsightsCaptureConfig config)
 	{
 		final String configured = config.outputDirectory();
 		if (configured != null && !configured.trim().isEmpty())
@@ -52,7 +52,7 @@ final class ClipStorage
 	}
 
 	/** Total bytes used by clips in the configured folder. */
-	static long usedBytes(InstantReplayConfig config)
+	static long usedBytes(ExchangeInsightsCaptureConfig config)
 	{
 		long total = 0;
 		for (File f : clips(outputDir(config)))
@@ -69,7 +69,7 @@ final class ClipStorage
 	 * @param onWarn receives a human-readable message when over the limit in warn mode,
 	 *               or when clips had to be removed.
 	 */
-	static void enforceLimit(InstantReplayConfig config, Consumer<String> onWarn)
+	static void enforceLimit(ExchangeInsightsCaptureConfig config, Consumer<String> onWarn)
 	{
 		if (!config.limitLocalStorage())
 		{
@@ -93,7 +93,7 @@ final class ClipStorage
 		if (config.storageLimitMode() == StorageLimitMode.WARN)
 		{
 			onWarn.accept(String.format(
-				"Instant Replay: clip folder is %.1fGB, over your %dGB limit. Delete some clips or switch to auto delete.",
+				"Exchange Insights Capture: clip folder is %.1fGB, over your %dGB limit. Delete some clips or switch to auto delete.",
 				used / (double) BYTES_PER_GB, config.localStorageLimitGb()));
 			return;
 		}
@@ -121,7 +121,7 @@ final class ClipStorage
 
 		if (removed > 0)
 		{
-			onWarn.accept("Instant Replay: removed " + removed
+			onWarn.accept("Exchange Insights Capture: removed " + removed
 				+ (removed == 1 ? " old clip" : " old clips") + " to stay under your "
 				+ config.localStorageLimitGb() + "GB limit.");
 		}

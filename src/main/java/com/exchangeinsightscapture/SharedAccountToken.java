@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import net.runelite.client.config.ConfigManager;
 

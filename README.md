@@ -1,8 +1,8 @@
-# Instant Replay
+# Exchange Insights Capture
 
 A ShadowPlay-style instant replay plugin for [RuneLite](https://runelite.net/).
 
-Instant Replay continuously keeps the last few seconds of gameplay in a rolling
+Exchange Insights Capture continuously keeps the last few seconds of gameplay in a rolling
 in-memory buffer and automatically saves an MP4 clip of the moments leading up
 to (and just after) configurable in-game events — deaths, collection log
 unlocks, level ups, valuable drops, pets and more. You can also bind a hotkey to
@@ -46,7 +46,7 @@ save a clip on demand.
 
 ## Usage
 
-1. Enable **Instant Replay** in the RuneLite plugin list.
+1. Enable **Exchange Insights Capture** in the RuneLite plugin list.
 2. Open the plugin's config panel and pick which events should save a clip
    (and, optionally, set a **Manual save hotkey** for on-demand capture).
 3. Play normally. When a trigger fires, the plugin captures the surrounding

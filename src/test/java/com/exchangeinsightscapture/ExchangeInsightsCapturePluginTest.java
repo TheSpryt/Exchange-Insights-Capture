@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import net.runelite.client.RuneLite;
 import net.runelite.client.externalplugins.ExternalPluginManager;
@@ -7,11 +7,11 @@ import net.runelite.client.externalplugins.ExternalPluginManager;
  * Dev launcher: runs a RuneLite client with this plugin side-loaded.
  * Use {@code ./gradlew run}.
  */
-public class InstantReplayPluginTest
+public class ExchangeInsightsCapturePluginTest
 {
 	public static void main(String[] args) throws Exception
 	{
-		ExternalPluginManager.loadBuiltin(InstantReplayPlugin.class);
+		ExternalPluginManager.loadBuiltin(ExchangeInsightsCapturePlugin.class);
 		RuneLite.main(args);
 	}
 }

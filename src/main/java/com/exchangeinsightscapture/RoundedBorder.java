@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.awt.BasicStroke;
 import java.awt.Color;

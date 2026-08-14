@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.awt.Image;
 import java.awt.image.BufferedImage;
@@ -57,12 +57,12 @@ final class ClipLibrary
 		}
 	}
 
-	private static File thumbDir(InstantReplayConfig config)
+	private static File thumbDir(ExchangeInsightsCaptureConfig config)
 	{
 		return new File(ClipStorage.outputDir(config), THUMB_DIR);
 	}
 
-	private static File thumbFor(InstantReplayConfig config, String clipFileName)
+	private static File thumbFor(ExchangeInsightsCaptureConfig config, String clipFileName)
 	{
 		final int dot = clipFileName.lastIndexOf('.');
 		final String base = dot > 0 ? clipFileName.substring(0, dot) : clipFileName;
@@ -70,7 +70,7 @@ final class ClipLibrary
 	}
 
 	/** Saved clips, newest first. */
-	static List<Entry> list(InstantReplayConfig config)
+	static List<Entry> list(ExchangeInsightsCaptureConfig config)
 	{
 		final File dir = ClipStorage.outputDir(config);
 		final File[] found = dir.listFiles(f -> f.isFile() && f.getName().toLowerCase().endsWith(".mp4"));
@@ -90,7 +90,7 @@ final class ClipLibrary
 	 * Write the thumbnail sidecar for a clip from one of its own buffered frames.
 	 * Best-effort: a missing thumbnail costs a placeholder in the panel, nothing more.
 	 */
-	static void writeThumbnail(InstantReplayConfig config, File clip, byte[] jpegFrame)
+	static void writeThumbnail(ExchangeInsightsCaptureConfig config, File clip, byte[] jpegFrame)
 	{
 		if (jpegFrame == null || jpegFrame.length == 0)
 		{
@@ -125,7 +125,7 @@ final class ClipLibrary
 	}
 
 	/** The clip's thumbnail, or null when there isn't one (clips saved before this existed). */
-	static Image thumbnail(InstantReplayConfig config, Entry entry)
+	static Image thumbnail(ExchangeInsightsCaptureConfig config, Entry entry)
 	{
 		final File f = thumbFor(config, entry.name);
 		if (!f.isFile())
@@ -148,7 +148,7 @@ final class ClipLibrary
 	 *
 	 * @return the new file, or null if the rename could not be performed.
 	 */
-	static File rename(InstantReplayConfig config, Entry entry, String requested)
+	static File rename(ExchangeInsightsCaptureConfig config, Entry entry, String requested)
 	{
 		final String clean = sanitise(requested);
 		if (clean.isEmpty())
@@ -181,7 +181,7 @@ final class ClipLibrary
 	}
 
 	/** Delete a clip and its thumbnail. */
-	static boolean delete(InstantReplayConfig config, Entry entry)
+	static boolean delete(ExchangeInsightsCaptureConfig config, Entry entry)
 	{
 		final File thumb = thumbFor(config, entry.name);
 		if (thumb.isFile())

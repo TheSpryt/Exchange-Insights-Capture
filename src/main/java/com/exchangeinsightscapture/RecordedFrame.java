@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 /**
  * A single captured frame, held in the rolling buffer as JPEG-compressed bytes

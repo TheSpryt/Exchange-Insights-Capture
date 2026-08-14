@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.awt.Color;
 import java.awt.Dimension;
@@ -12,10 +12,10 @@ import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
 
 /**
- * Compact on-screen indicator showing whether Instant Replay is armed, actively
+ * Compact on-screen indicator showing whether Exchange Insights Capture is armed, actively
  * recording a triggered clip, or has just finished saving one (a brief flash).
  */
-class InstantReplayOverlay extends OverlayPanel
+class ExchangeInsightsCaptureOverlay extends OverlayPanel
 {
 	private static final long SAVE_FLASH_MS = 2500;
 
@@ -25,13 +25,13 @@ class InstantReplayOverlay extends OverlayPanel
 
 	private static final Color SAVING_COLOR = new Color(230, 170, 40);
 
-	private final InstantReplayConfig config;
+	private final ExchangeInsightsCaptureConfig config;
 	private final BooleanSupplier armed;
 	private final BooleanSupplier recording;
 	private final IntSupplier savingCount;
 	private final LongSupplier lastSavedAt;
 
-	InstantReplayOverlay(net.runelite.client.plugins.Plugin plugin, InstantReplayConfig config,
+	ExchangeInsightsCaptureOverlay(net.runelite.client.plugins.Plugin plugin, ExchangeInsightsCaptureConfig config,
 		BooleanSupplier armed, BooleanSupplier recording, IntSupplier savingCount, LongSupplier lastSavedAt)
 	{
 		super(plugin);
@@ -87,7 +87,7 @@ class InstantReplayOverlay extends OverlayPanel
 		panelComponent.getChildren().clear();
 		panelComponent.setPreferredSize(new Dimension(125, 0));
 		panelComponent.getChildren().add(TitleComponent.builder()
-			.text("Instant Replay")
+			.text("Exchange Insights Capture")
 			.color(color)
 			.build());
 		panelComponent.getChildren().add(LineComponent.builder()

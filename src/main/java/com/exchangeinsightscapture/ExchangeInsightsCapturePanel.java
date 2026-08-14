@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -33,7 +33,7 @@ import net.runelite.client.ui.PluginPanel;
  * <p>Styling follows the same family as the Bank Templates panel - rounded filled
  * status buttons in the RuneScape bold font - so the two plugins read as a set.
  */
-class InstantReplayPanel extends PluginPanel
+class ExchangeInsightsCapturePanel extends PluginPanel
 {
 	private static final Color GREEN = new Color(35, 78, 42);
 	private static final Color RED = new Color(94, 44, 44);
@@ -41,8 +41,8 @@ class InstantReplayPanel extends PluginPanel
 	private static final Color NEUTRAL = new Color(60, 60, 60);
 	private static final Color MUTED = new Color(0x9E, 0x9E, 0x9E);
 
-	private final InstantReplayPlugin plugin;
-	private final InstantReplayConfig config;
+	private final ExchangeInsightsCapturePlugin plugin;
+	private final ExchangeInsightsCaptureConfig config;
 	private final ConfigManager configManager;
 	private final ClipUploader uploader;
 
@@ -58,7 +58,7 @@ class InstantReplayPanel extends PluginPanel
 	/** True while a browser device-link is in flight. */
 	private boolean linking;
 
-	InstantReplayPanel(InstantReplayPlugin plugin, InstantReplayConfig config, ConfigManager configManager,
+	ExchangeInsightsCapturePanel(ExchangeInsightsCapturePlugin plugin, ExchangeInsightsCaptureConfig config, ConfigManager configManager,
 		ClipUploader uploader)
 	{
 		// wrap = false: this panel manages its own scrolling, so the settings button can be
@@ -78,7 +78,7 @@ class InstantReplayPanel extends PluginPanel
 		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
 		body.setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-		body.add(title("Instant Replay"));
+		body.add(title("Exchange Insights Capture"));
 		body.add(Box.createVerticalStrut(8));
 
 		// Account first, as in the Bank Templates panel - it is the thing users look for.
@@ -230,7 +230,7 @@ class InstantReplayPanel extends PluginPanel
 				listeningForKey = false;
 				if (e.getKeyCode() != KeyEvent.VK_ESCAPE)
 				{
-					configManager.setConfiguration(InstantReplayConfig.GROUP, "manualToggleHotkey",
+					configManager.setConfiguration(ExchangeInsightsCaptureConfig.GROUP, "manualToggleHotkey",
 						new Keybind(e.getKeyCode(), e.getModifiersEx()));
 				}
 				refresh();
@@ -491,7 +491,7 @@ class InstantReplayPanel extends PluginPanel
 
 	private void setMode(CaptureMode mode)
 	{
-		configManager.setConfiguration(InstantReplayConfig.GROUP, "captureMode", mode);
+		configManager.setConfiguration(ExchangeInsightsCaptureConfig.GROUP, "captureMode", mode);
 		refresh();
 	}
 

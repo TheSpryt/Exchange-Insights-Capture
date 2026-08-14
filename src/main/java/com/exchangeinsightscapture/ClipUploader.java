@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -21,7 +21,7 @@ import okhttp3.ResponseBody;
  * Uploads saved clips to the player's Exchange Insights account.
  *
  * <p>The account token is shared across this developer's plugins: whichever of
- * Instant Replay, Exchange Insights or Bank Templates has one configured, the
+ * this plugin, Exchange Insights or Bank Templates has one configured, the
  * others borrow it, so a player links once and every plugin is linked. The token
  * is read live on each use and never copied, so revoking it anywhere takes effect
  * immediately.
@@ -36,14 +36,14 @@ class ClipUploader
 	private static final MediaType MP4 = MediaType.parse("video/mp4");
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
-	private final InstantReplayConfig config;
+	private final ExchangeInsightsCaptureConfig config;
 	private final ConfigManager configManager;
 	private final OkHttpClient http;
 	private final ScheduledExecutorService executor;
 	private final Consumer<String> notify;
 	private final Gson gson = new Gson();
 
-	ClipUploader(InstantReplayConfig config, ConfigManager configManager, OkHttpClient http,
+	ClipUploader(ExchangeInsightsCaptureConfig config, ConfigManager configManager, OkHttpClient http,
 		ScheduledExecutorService executor, Consumer<String> notify)
 	{
 		this.config = config;
@@ -57,7 +57,7 @@ class ClipUploader
 	static boolean isSharedTokenKey(String group, String key)
 	{
 		return SharedAccountToken.isTokenKey(group, key)
-			|| (InstantReplayConfig.GROUP.equals(group) && "eiAccountToken".equals(key));
+			|| (ExchangeInsightsCaptureConfig.GROUP.equals(group) && "eiAccountToken".equals(key));
 	}
 
 	/**
@@ -172,7 +172,7 @@ class ClipUploader
 			body.addProperty("accountName", rsn);
 		}
 		// Names the minted token on the website's account page after the plugin that asked for it.
-		body.addProperty("label", "Instant Replay plugin");
+		body.addProperty("label", "Exchange Insights Capture plugin");
 		post("/api/plugin/link/start", null, body, LinkStart.class, onStart, onError);
 	}
 
@@ -214,7 +214,7 @@ class ClipUploader
 	{
 		final Request.Builder b = new Request.Builder()
 			.url(BASE_URL + path)
-			.header("User-Agent", "InstantReplay RuneLite plugin")
+			.header("User-Agent", "Exchange Insights Capture RuneLite plugin")
 			.post(RequestBody.create(JSON, gson.toJson(body)));
 		if (token != null && !token.isEmpty())
 		{
@@ -271,7 +271,7 @@ class ClipUploader
 				final Request request = new Request.Builder()
 					.url(BASE_URL + "/api/plugin/clips/quota")
 					.header("Authorization", "Bearer " + token)
-					.header("User-Agent", "InstantReplay RuneLite plugin")
+					.header("User-Agent", "Exchange Insights Capture RuneLite plugin")
 					.get()
 					.build();
 				try (Response response = http.newCall(request).execute())
@@ -326,7 +326,7 @@ class ClipUploader
 		final String token = effectiveToken();
 		if (token == null)
 		{
-			notify.accept("Instant Replay: upload skipped - no Exchange Insights account linked.");
+			notify.accept("Exchange Insights Capture: upload skipped - no Exchange Insights account linked.");
 			if (deleteAfter)
 			{
 				//noinspection ResultOfMethodCallIgnored
@@ -373,7 +373,7 @@ class ClipUploader
 			final Request request = new Request.Builder()
 				.url(b.build())
 				.header("Authorization", "Bearer " + token)
-				.header("User-Agent", "InstantReplay RuneLite plugin")
+				.header("User-Agent", "Exchange Insights Capture RuneLite plugin")
 				.post(RequestBody.create(MP4, file))
 				.build();
 
@@ -424,14 +424,14 @@ class ClipUploader
 				break;
 			case 401:
 			case 403:
-				notify.accept("Instant Replay: your Exchange Insights token was rejected. Re-link your account to resume uploads.");
+				notify.accept("Exchange Insights Capture: your Exchange Insights token was rejected. Re-link your account to resume uploads.");
 				break;
 			case 413:
-				notify.accept("Instant Replay: clip was too large to upload. Try a shorter clip or a lower resolution.");
+				notify.accept("Exchange Insights Capture: clip was too large to upload. Try a shorter clip or a lower resolution.");
 				break;
 			case 507:
 				// Quota exhausted and nothing could be evicted to make room.
-				notify.accept("Instant Replay: upload storage is full. Upgrade to premium or delete clips at exchange-insights.gg.");
+				notify.accept("Exchange Insights Capture: upload storage is full. Upgrade to premium or delete clips at exchange-insights.gg.");
 				break;
 			default:
 				log.debug("clip upload returned {} for {}", response.code(), file.getName());

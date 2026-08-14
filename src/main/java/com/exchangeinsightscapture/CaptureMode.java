@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 /**
  * How the plugin captures. The mode decides whether frames are being sampled at

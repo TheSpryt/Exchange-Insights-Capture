@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
@@ -8,10 +8,10 @@ import net.runelite.client.config.Keybind;
 import net.runelite.client.config.Range;
 import net.runelite.client.config.Units;
 
-@ConfigGroup(InstantReplayConfig.GROUP)
-public interface InstantReplayConfig extends Config
+@ConfigGroup(ExchangeInsightsCaptureConfig.GROUP)
+public interface ExchangeInsightsCaptureConfig extends Config
 {
-	String GROUP = "instantreplay";
+	String GROUP = "exchangeinsightscapture";
 
 	@ConfigSection(
 		name = "Recording",
@@ -355,7 +355,7 @@ public interface InstantReplayConfig extends Config
 	@ConfigItem(
 		keyName = "showStatusOverlay",
 		name = "Show status overlay",
-		description = "Show a small on-screen indicator when Instant Replay is armed, recording a clip, or has just saved one.",
+		description = "Show a small on-screen indicator when Exchange Insights Capture is armed, recording a clip, or has just saved one.",
 		section = outputSection,
 		position = 2
 	)

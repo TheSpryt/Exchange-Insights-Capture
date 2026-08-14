@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -48,7 +48,7 @@ class ClipRecorder
 	/** If a requested frame never arrives (client not rendering), re-arm after this long. */
 	private static final long FRAME_REQUEST_TIMEOUT_MS = 2000;
 
-	private final InstantReplayConfig config;
+	private final ExchangeInsightsCaptureConfig config;
 	private final DrawManager drawManager;
 	private final BooleanSupplier canCapture;
 	private final Supplier<java.awt.geom.Point2D.Double> mousePosition;
@@ -98,7 +98,7 @@ class ClipRecorder
 	// recording cannot grow without limit.
 	private List<RecordedFrame> sessionFrames;
 
-	ClipRecorder(InstantReplayConfig config, DrawManager drawManager, BooleanSupplier canCapture,
+	ClipRecorder(ExchangeInsightsCaptureConfig config, DrawManager drawManager, BooleanSupplier canCapture,
 		Supplier<java.awt.geom.Point2D.Double> mousePosition, Consumer<File> onSaved, Consumer<String> onError)
 	{
 		this.config = config;
@@ -575,7 +575,7 @@ class ClipRecorder
 		}
 		catch (IOException | RuntimeException ex)
 		{
-			log.warn("Failed to save Instant Replay clip", ex);
+			log.warn("Failed to save Exchange Insights Capture clip", ex);
 			error = ex.getMessage();
 		}
 		finally

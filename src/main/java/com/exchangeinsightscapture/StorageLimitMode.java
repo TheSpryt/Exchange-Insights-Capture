@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 /** What to do once saved clips exceed the local size limit. */
 public enum StorageLimitMode

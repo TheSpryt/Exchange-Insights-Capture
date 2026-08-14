@@ -1,4 +1,4 @@
-package com.instantreplay;
+package com.exchangeinsightscapture;
 
 import com.google.inject.Provides;
 import java.awt.image.BufferedImage;
@@ -39,11 +39,11 @@ import okhttp3.OkHttpClient;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Instant Replay",
+	name = "Exchange Insights Capture",
 	description = "Automatically saves a video clip of the moments around in-game events like deaths and collection log unlocks",
 	tags = {"record", "recording", "video", "clip", "replay", "death", "collection", "capture", "highlight"}
 )
-public class InstantReplayPlugin extends Plugin
+public class ExchangeInsightsCapturePlugin extends Plugin
 {
 	@Inject
 	private Client client;
@@ -79,11 +79,11 @@ public class InstantReplayPlugin extends Plugin
 	private OkHttpClient httpClient;
 
 	@Inject
-	private InstantReplayConfig config;
+	private ExchangeInsightsCaptureConfig config;
 
 	private ClipRecorder recorder;
-	private InstantReplayOverlay overlay;
-	private InstantReplayPanel panel;
+	private ExchangeInsightsCaptureOverlay overlay;
+	private ExchangeInsightsCapturePanel panel;
 	private NavigationButton navButton;
 	private ClipUploader uploader;
 	private volatile long lastSavedAtMs = Long.MIN_VALUE;
@@ -111,9 +111,9 @@ public class InstantReplayPlugin extends Plugin
 	};
 
 	@Provides
-	InstantReplayConfig provideConfig(ConfigManager configManager)
+	ExchangeInsightsCaptureConfig provideConfig(ConfigManager configManager)
 	{
-		return configManager.getConfig(InstantReplayConfig.class);
+		return configManager.getConfig(ExchangeInsightsCaptureConfig.class);
 	}
 
 	@Override
@@ -134,16 +134,16 @@ public class InstantReplayPlugin extends Plugin
 
 		// Pass `this` so overlay.getPlugin() resolves; RuneLite's ConfigPlugin needs it
 		// to know which plugin's settings to open (see openConfigPanel).
-		overlay = new InstantReplayOverlay(this, config, this::canCapture,
+		overlay = new ExchangeInsightsCaptureOverlay(this, config, this::canCapture,
 			() -> recorder != null && recorder.isSessionActive(),
 			() -> recorder == null ? 0 : recorder.getPendingEncodes(),
 			() -> lastSavedAtMs);
 		overlayManager.add(overlay);
 
-		panel = new InstantReplayPanel(this, config, configManager, uploader);
-		final BufferedImage icon = ImageUtil.loadImageResource(InstantReplayPlugin.class, "/com/instantreplay/icon.png");
+		panel = new ExchangeInsightsCapturePanel(this, config, configManager, uploader);
+		final BufferedImage icon = ImageUtil.loadImageResource(ExchangeInsightsCapturePlugin.class, "/com/exchangeinsightscapture/icon.png");
 		navButton = NavigationButton.builder()
-			.tooltip("Instant Replay")
+			.tooltip("Exchange Insights Capture")
 			.icon(icon)
 			.priority(8)
 			.panel(panel)
@@ -191,7 +191,7 @@ public class InstantReplayPlugin extends Plugin
 		if (overlay != null)
 		{
 			eventBus.post(new OverlayMenuClicked(
-				new OverlayMenuEntry(MenuAction.RUNELITE_OVERLAY_CONFIG, "Configure", "Instant Replay"),
+				new OverlayMenuEntry(MenuAction.RUNELITE_OVERLAY_CONFIG, "Configure", "Exchange Insights Capture"),
 				overlay));
 		}
 	}
@@ -336,7 +336,7 @@ public class InstantReplayPlugin extends Plugin
 			SharedAccountToken.set(configManager, token);
 		}
 		finishLinking();
-		notifyChat("Instant Replay: your Exchange Insights account is linked.");
+		notifyChat("Exchange Insights Capture: your Exchange Insights account is linked.");
 	}
 
 	private void failLink(String reason)
@@ -351,7 +351,7 @@ public class InstantReplayPlugin extends Plugin
 	{
 		linking = false;
 		setPanelLinking(false);
-		final InstantReplayPanel p = panel;
+		final ExchangeInsightsCapturePanel p = panel;
 		if (p != null)
 		{
 			javax.swing.SwingUtilities.invokeLater(p::refreshQuota);
@@ -360,7 +360,7 @@ public class InstantReplayPlugin extends Plugin
 
 	private void setPanelLinking(boolean value)
 	{
-		final InstantReplayPanel p = panel;
+		final ExchangeInsightsCapturePanel p = panel;
 		if (p != null)
 		{
 			javax.swing.SwingUtilities.invokeLater(() -> p.setLinking(value));
@@ -393,9 +393,9 @@ public class InstantReplayPlugin extends Plugin
 				() -> javax.swing.SwingUtilities.invokeLater(() ->
 				{
 					SharedAccountToken.clear(configManager);
-					configManager.setConfiguration(InstantReplayConfig.GROUP, "eiAccountToken", "");
+					configManager.setConfiguration(ExchangeInsightsCaptureConfig.GROUP, "eiAccountToken", "");
 					finishLinking();
-					notifyChat("Instant Replay: this character is no longer linked.");
+					notifyChat("Exchange Insights Capture: this character is no longer linked.");
 				}),
 				error -> javax.swing.SwingUtilities.invokeLater(() -> failLink(error))));
 		});
@@ -403,7 +403,7 @@ public class InstantReplayPlugin extends Plugin
 
 	private void panelRefresh()
 	{
-		final InstantReplayPanel p = panel;
+		final ExchangeInsightsCapturePanel p = panel;
 		if (p != null)
 		{
 			javax.swing.SwingUtilities.invokeLater(p::refresh);
@@ -413,7 +413,7 @@ public class InstantReplayPlugin extends Plugin
 	/** Redraw the clip list after the folder changes (a save, or a prune). */
 	private void panelRefreshClips()
 	{
-		final InstantReplayPanel p = panel;
+		final ExchangeInsightsCapturePanel p = panel;
 		if (p != null)
 		{
 			javax.swing.SwingUtilities.invokeLater(p::refreshClips);
@@ -460,18 +460,18 @@ public class InstantReplayPlugin extends Plugin
 		}
 		if (config.captureMode() != CaptureMode.MANUAL)
 		{
-			notifyChat("Instant Replay: set Capture mode to Manual to use the arm hotkey.");
+			notifyChat("Exchange Insights Capture: set Capture mode to Manual to use the arm hotkey.");
 			return;
 		}
 		if (recorder.isSessionActive())
 		{
 			recorder.stopSession();
-			notifyChat("Instant Replay: recording stopped, saving...");
+			notifyChat("Exchange Insights Capture: recording stopped, saving...");
 		}
 		else
 		{
 			recorder.startSession();
-			notifyChat("Instant Replay: recording started.");
+			notifyChat("Exchange Insights Capture: recording started.");
 		}
 		panelRefresh();
 	}
@@ -663,7 +663,7 @@ public class InstantReplayPlugin extends Plugin
 		{
 			// A different token means a different account, so the allowance must be re-read
 			// from the server rather than carried over.
-			final InstantReplayPanel p = panel;
+			final ExchangeInsightsCapturePanel p = panel;
 			if (p != null)
 			{
 				javax.swing.SwingUtilities.invokeLater(p::refreshQuota);
@@ -671,7 +671,7 @@ public class InstantReplayPlugin extends Plugin
 			return;
 		}
 
-		if (!InstantReplayConfig.GROUP.equals(event.getGroup()))
+		if (!ExchangeInsightsCaptureConfig.GROUP.equals(event.getGroup()))
 		{
 			return;
 		}
@@ -707,8 +707,8 @@ public class InstantReplayPlugin extends Plugin
 	private void onClipSaved(File file)
 	{
 		lastSavedAtMs = System.currentTimeMillis();
-		log.info("Instant Replay saved clip to {}", file);
-		notifyChat("Instant Replay saved: " + file.getName());
+		log.info("Exchange Insights Capture saved clip to {}", file);
+		notifyChat("Exchange Insights Capture saved: " + file.getName());
 		panelRefresh();
 		panelRefreshClips();
 
@@ -727,8 +727,8 @@ public class InstantReplayPlugin extends Plugin
 
 	private void onClipError(String message)
 	{
-		log.warn("Instant Replay failed to save a clip: {}", message);
-		notifyChat("Instant Replay could not save a clip: " + message);
+		log.warn("Exchange Insights Capture failed to save a clip: {}", message);
+		notifyChat("Exchange Insights Capture could not save a clip: " + message);
 		panelRefresh();
 	}
 }

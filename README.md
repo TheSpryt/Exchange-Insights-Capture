@@ -24,7 +24,8 @@ save a clip on demand.
 - **Clip length** — total clip duration (default 15s).
 - **Post-event padding** — seconds recorded after the event; the remainder is
   the lead-up (default 2s).
-- **Framerate** — frames per second to capture and encode (default 30).
+- **Framerate** — frames per second to capture (default 15). **This is the main
+  performance dial** — see [Performance](#performance) below.
 - **Resolution** — vertical resolution; the client is downscaled to this height
   and never upscaled (default 720p).
 - **JPEG buffer quality** — trade memory use against clip quality.
@@ -37,8 +38,8 @@ save a clip on demand.
   completion, on combat task.
 
 **Output**
-- **Save folder** — defaults to the RuneLite directory's `instant-replay`
-  folder.
+- **Save folder** — defaults to the RuneLite directory's `captures` folder,
+  alongside RuneLite's own `screenshots`.
 - **Chat message on save** — confirms each saved clip in-game.
 - **Show status overlay** — a small on-screen indicator showing when the plugin
   is armed, actively recording a clip, or has just saved one.
@@ -54,7 +55,29 @@ save a clip on demand.
 
 Clips are named `<timestamp>_<reason>.mp4` (for example
 `2026-06-23_18-30-05_death.mp4`), so they sort chronologically and are easy to
-find after a session.
+find after a session. They are written to `.runelite/captures/`.
+
+## Performance
+
+Capturing a frame means asking the client to hand back what it just rendered.
+On the **GPU** and **117HD** renderers that requires reading pixels back from
+the GPU, which stalls the render pipeline — so capture rate has a direct and
+sometimes large cost in in-game FPS.
+
+**Framerate is the dial that matters.** Cost scales roughly linearly with it:
+capturing at 60fps is four times the readback cost of 15fps. If your FPS drops,
+lower it first. 15fps is smooth enough for replay clips; above 30 gets expensive
+regardless of how fast your machine is.
+
+Secondary levers, in rough order of effect:
+
+- **Resolution** — downscaling to 720p or 480p cuts the per-frame scale and JPEG
+  cost (it does not reduce the readback itself).
+- **Clip length** — sets how many frames are held in memory at once.
+- **JPEG buffer quality** — trades clip quality for memory and CPU.
+
+The plugin keeps at most one frame request outstanding at a time, so it will not
+pile up requests and make a struggling client worse.
 
 ## Building
 

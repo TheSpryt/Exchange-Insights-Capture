@@ -19,9 +19,9 @@ public enum ClipFramerate
 {
 	/** Smallest files and the longest buffer window. Fine for anything that is not fast-moving. */
 	FPS_30(30),
-	/** The rate the game itself runs its client tick display at. */
+	/** The default, and the rate the client itself draws the game at. */
 	FPS_50(50),
-	/** The default. Smooth on any ordinary display, and half the cost of an uncapped client. */
+	/** Matches an ordinary display's refresh, for slightly smoother playback than the game runs. */
 	FPS_60(60),
 	/** For high-refresh monitors. Costs twice 60 in memory, encode time and disk. */
 	FPS_120(120);

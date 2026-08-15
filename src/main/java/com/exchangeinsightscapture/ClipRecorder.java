@@ -562,7 +562,7 @@ class ClipRecorder
 	}
 
 	/** The gap between captures, from {@link ClipFramerate}. Read on the render thread. */
-	private volatile long capturePeriodNanos = ClipFramerate.FPS_60.periodNanos();
+	private volatile long capturePeriodNanos = ClipFramerate.FPS_50.periodNanos();
 
 	/**
 	 * When the next capture is allowed.

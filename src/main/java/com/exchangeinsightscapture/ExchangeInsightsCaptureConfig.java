@@ -95,7 +95,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	)
 	default ClipFramerate captureFps()
 	{
-		return ClipFramerate.FPS_60;
+		return ClipFramerate.FPS_50;
 	}
 
 	@ConfigItem(

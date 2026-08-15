@@ -13,23 +13,34 @@ import lombok.extern.slf4j.Slf4j;
  * {@code field1179} because they were produced by deobfuscation. The names here are the meanings
  * those fields have in the format, worked out from the order they are read in.
  *
- * <p>NOT FINISHED, and not wired to anything. The parse is verified - a coin tinkle decomposes
- * into three staggered voices at 0, 200 and 340ms, and a door into one 150ms voice, which a wrong
- * parser does not produce. The synthesis is a reconstruction from field ordering and is known to
- * be wrong.
+ * <p>Not wired to anything yet - nothing can put audio into a clip a browser will play until there
+ * is an encoder for it. See {@link AudioCapture} for that half of the problem.
  *
- * <p>What was measured, for whoever picks this up: the UI beep (2266) renders correctly, and it is
- * the one sound where this model has nothing to get wrong - its oscillator pitch is 0 and its
- * pitch comes entirely from the envelope. The door (62) and the coin tinkle (3924) both have an
- * oscillator pitch of 120 and both come out wrong, so how that field combines with the envelope is
- * the missing piece. The tinkle's pitch envelope is 0 to 0, so its pitch cannot come from the
- * envelope at all - something unmodelled supplies it, and this code only makes a noise there
- * because of the 20Hz floor below.
+ * <p>The synthesis was fitted against the real client rather than reasoned out. The game's own
+ * audio was recorded and its spectrum compared against this code's, which turned three wrong
+ * guesses into measurements:
  *
- * <p>The filter is deliberately not implemented yet. It shapes the timbre, and leaving it out
- * makes a sound duller than the real thing, but everything that decides whether a sound is
- * RECOGNISABLE - its oscillators, pitch and envelope - is here. If a door does not sound like a
- * door without the filter, the filter was never going to save it.
+ * <ul>
+ *   <li>Pitch envelope values are frequencies in Hz, flatly and with no scaling. The UI beep holds
+ *       a constant 1000 and the real sound measures 999Hz, with 94% of its energy there.</li>
+ *   <li>Oscillator pitch is added in Hz. It was being applied as a 2^(n/1536) detune, which for
+ *       the value every sound uses comes to 1.05 - inaudible - so it did nothing whatsoever.</li>
+ *   <li>A flat zero pitch envelope means the third envelope pair gives the period in samples. The
+ *       coin tinkle measures 5514Hz; the mixer runs at 22050 and that sound's third pair ends at
+ *       4, and 22050/4 is 5512.5.</li>
+ * </ul>
+ *
+ * <p>Two plain defects turned up alongside those. The volume envelope was applied twice, squaring
+ * every decay, and waveform 4 was a deterministic square running 977 times too fast rather than
+ * noise, which made the door hiss instead of rumble. Either alone would have made any pitch model
+ * sound wrong, which is part of why this took as long as it did to corner.
+ *
+ * <p>Still unverified: the eighteen unnamed sounds sharing the tinkle's signature, two of which
+ * have a third pair ending at 2 or 3 rather than 4. The rule predicts them; nothing has confirmed
+ * it. The filter is still not implemented - its pole magnitudes measure 0.14 and 0.20 on the two
+ * sounds carrying one, far too low to ring, so it tilts timbre rather than supplying pitch. Worth
+ * having checked, because a resonant filter would have been a very reasonable place for a metallic
+ * sound to come from, and that is exactly what it turned out not to be.
  */
 @Slf4j
 final class SoundSynth
@@ -163,6 +174,13 @@ final class SoundSynth
 		Envelope volumeMultiplierAmplitude;
 		Envelope release;
 		Envelope attack;
+		/**
+		 * The period, in samples, for a voice whose pitch envelope is flat zero.
+		 *
+		 * <p>Taken from the third envelope pair's end. See {@link #render} for the measurement
+		 * this rests on.
+		 */
+		int flatPeriod;
 		final int[] oscillatorVolume = new int[10];
 		final int[] oscillatorPitch = new int[10];
 		final int[] oscillatorDelay = new int[10];
@@ -196,6 +214,7 @@ final class SoundSynth
 				r.back();
 				in.release = Envelope.read(r);
 				in.attack = Envelope.read(r);
+				in.flatPeriod = in.release.end;
 			}
 
 			for (int i = 0; i < 10; i++)
@@ -228,15 +247,32 @@ final class SoundSynth
 		 * <p>Accumulated as doubles and scaled once at the end. Summing into ints was what made
 		 * the first attempt silent: the per-sample amplitude works out below 1, so every sample
 		 * truncated to zero and three correctly-parsed sounds rendered as digital silence.
+		 *
+		 * <p>The pitch envelope's value is a frequency in Hz, flatly and with no scaling. That is
+		 * measured, not deduced: the UI beep holds a constant 1000 and the real client plays it at
+		 * 999Hz with 94% of its energy in that one peak. An earlier version treated the oscillator
+		 * pitch as a detune of 2^(n/1536), which for the value every sound uses works out at 1.05 -
+		 * inaudible - so it was doing nothing at all. It is added in Hz.
+		 *
+		 * <p>Then there is the case that took the longest. Nineteen of the cache's twelve thousand
+		 * sounds have a pitch envelope of flat zero, and no reading of a zero can produce a pitch.
+		 * All nineteen also carry the third envelope pair and an oscillator pitch of 120 - a
+		 * signature that precise is not authoring coincidence. For the one of them the game names,
+		 * the coin tinkle, the real sound measures 5514Hz, and the mixer runs at 22050 with that
+		 * sound's third pair ending at 4. 22050/4 is 5512.5, inside a single analysis bin. So a
+		 * flat zero pitch means the third pair gives the period in samples instead.
+		 *
+		 * <p>Deliberately narrow. The third pair is on 2828 sounds, and 2809 of those have a real
+		 * pitch envelope, so letting it always win would throw away 2809 working envelopes -
+		 * including the beep's, which is directly confirmed. This changes nineteen sounds and
+		 * leaves the rest on the path that measurement backs.
 		 */
 		double[] render()
 		{
 			final int samples = Math.max(1, duration * SAMPLE_RATE / 1000);
 			final double[] out = new double[samples];
+			final boolean flat = pitch.start == 0 && pitch.end == 0 && flatPeriod > 0;
 
-			// The envelope's start and end bound the pitch in the format's own units; 128 units to
-			// the semitone against a middle reference is what makes a door land near 80Hz and a
-			// UI beep near 350Hz, which is where they audibly belong.
 			for (int osc = 0; osc < oscillatorVolume.length; osc++)
 			{
 				final int oscVolume = oscillatorVolume[osc];
@@ -244,21 +280,47 @@ final class SoundSynth
 				{
 					continue;
 				}
-				final double detune = Math.pow(2, oscillatorPitch[osc] / 1536.0);
 				final int delay = oscillatorDelay[osc] * SAMPLE_RATE / 1000;
 				double phase = 0;
+				// Noise state, per oscillator so two of them do not produce the same noise.
+				long seed = 0x9E3779B97F4A7C15L * (osc + 1);
+				double held = 0;
+				double lastCycle = -1;
 
 				for (int i = delay; i < samples; i++)
 				{
 					final double t = (double) i / samples;
-					final double pitchAt = pitch.start + (pitch.end - pitch.start) * pitch.at(t);
-					final double hz = Math.max(20, Math.min(SAMPLE_RATE / 2.0, pitchAt * detune));
-					phase += hz / SAMPLE_RATE;
+					final double hz = flat
+						? (double) SAMPLE_RATE / flatPeriod
+						: pitch.start + (pitch.end - pitch.start) * pitch.at(t) + oscillatorPitch[osc];
+					phase += Math.max(20, Math.min(SAMPLE_RATE / 2.0, hz)) / SAMPLE_RATE;
 
-					// Volume is a 0-100 level shaped by its envelope, and the oscillator's own
-					// volume is a share of that rather than a second multiplier in the same units.
+					double shape;
+					if (pitch.form == NOISE)
+					{
+						// One new random value per cycle, so the pitch decides how coarse the
+						// noise is. The previous attempt was ((int) (phase * 977) % 2), a
+						// deterministic square running 977 times too fast, which turned the door -
+						// whose waveform is noise - into a hiss.
+						final double cycle = Math.floor(phase);
+						if (cycle != lastCycle)
+						{
+							lastCycle = cycle;
+							seed = seed * 6364136223846793005L + 1442695040888963407L;
+							held = ((seed >>> 40) & 0xFFFFFF) / 8388608.0 - 1.0;
+						}
+						shape = held;
+					}
+					else
+					{
+						shape = wave(pitch.form, phase);
+					}
+
+					// Once, not twice. This used to fold volume.at(t) into a level that already
+					// contained it, squaring the envelope, so every sound decayed harder and
+					// faster than its definition asks for.
 					final double level = (volume.start + (volume.end - volume.start) * volume.at(t)) / 100.0;
-					out[i] += wave(pitch.form, phase) * level * volume.at(t) * (oscVolume / 100.0);
+					out[i] += shape * level * (oscVolume / 100.0);
 				}
 			}
 			return out;
@@ -315,6 +377,9 @@ final class SoundSynth
 		}
 	}
 
+	/** Waveform 4 is noise, which needs state and so is generated in {@link Instrument#render}. */
+	private static final int NOISE = 4;
+
 	/** The oscillator shapes the format uses, by form number. */
 	private static double wave(int form, double phase)
 	{
@@ -327,8 +392,6 @@ final class SoundSynth
 				return Math.sin(p * 2 * Math.PI);
 			case 3: // saw
 				return p * 2 - 1;
-			case 4: // noise, held for a whole cycle so it has pitch rather than being hiss
-				return ((int) (phase * 977) % 2 == 0) ? 1 : -1;
 			default:
 				return 0;
 		}

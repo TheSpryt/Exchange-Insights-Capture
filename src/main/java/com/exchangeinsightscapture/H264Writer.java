@@ -268,7 +268,10 @@ final class H264Writer
 	/**
 	 * Encode {@code frames} into {@code out}.
 	 *
-	 * <p>Video only. There is deliberately no audio track here - see {@link AudioCapture} for why.
+	 * <p>Video only, and deliberately so. Clips carried a microphone track for a while, as raw PCM
+	 * because that is the only audio JCodec can encode - and no browser can decode PCM in an MP4,
+	 * so a clip with sound would not play on the website at all. Adding audio back means an
+	 * encoder browsers accept, which means AAC-LC, which JCodec cannot produce either.
 	 *
 	 * @param cancelled checked between frames so a cancelled clip stops promptly.
 	 */

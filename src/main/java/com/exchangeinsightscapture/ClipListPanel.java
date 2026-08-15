@@ -229,12 +229,6 @@ class ClipListPanel extends JPanel
 		// and is replaced by the real card when the file lands, rather than the list sitting
 		// unchanged for the half-minute an encode takes.
 		final java.util.List<ClipRecorder.PendingClip> inFlight = pendingClips.get();
-		for (ClipRecorder.PendingClip p : inFlight)
-		{
-			add(pendingCard(p));
-			add(Box.createVerticalStrut(6));
-		}
-
 		final List<ClipEntry> clips = visible();
 		if (inFlight.isEmpty() && clips.isEmpty())
 		{
@@ -267,6 +261,20 @@ class ClipListPanel extends JPanel
 		// glitch, and the range doubles as the clip count.
 		add(paginationRow(clips.size()));
 		add(Box.createVerticalStrut(6));
+
+		// Clips still being captured or encoded sit INSIDE the paged list, at the top of the first
+		// page, rather than above the pager. They are the newest thing there and belong with the
+		// clips they are about to join - floating them outside made them read as a separate section.
+		// They are not counted in the range, because the range describes what has actually been
+		// saved and a pending clip has no file yet.
+		if (offset == 0)
+		{
+			for (ClipRecorder.PendingClip p : inFlight)
+			{
+				add(pendingCard(p));
+				add(Box.createVerticalStrut(6));
+			}
+		}
 
 		for (int i = offset; i < end; i++)
 		{

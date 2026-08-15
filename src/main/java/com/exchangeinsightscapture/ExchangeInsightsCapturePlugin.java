@@ -1188,6 +1188,13 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		{
 			recorder.restartCapture();
 		}
+		else if (("captureMicrophone".equals(event.getKey()) || "microphoneDevice".equals(event.getKey()))
+			&& recorder != null)
+		{
+			// The microphone line is opened once and held, so changing device or switching it off
+			// has to reopen it - the setting alone changes nothing that is already running.
+			recorder.refreshAudio();
+		}
 		else if ("captureMode".equals(event.getKey()) && recorder != null
 			&& config.captureMode() != CaptureMode.MANUAL && recorder.isSessionActive())
 		{

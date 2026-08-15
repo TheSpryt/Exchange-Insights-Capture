@@ -261,6 +261,31 @@ final class H264Writer
 		}
 	}
 
+	/**
+	 * Write the soundtrack in one-second packets.
+	 *
+	 * <p>Not one packet for the whole clip: a player seeking has to be able to start from
+	 * somewhere, and a single multi-megabyte sample makes the whole track one indivisible unit.
+	 */
+	private static void writeAudio(org.jcodec.containers.mp4.muxer.PCMMP4MuxerTrack track, byte[] pcm)
+		throws IOException
+	{
+		final int rate = AudioCapture.SAMPLE_RATE;
+		final int frameBytes = AudioCapture.BYTES_PER_FRAME;
+		final int perPacket = rate * frameBytes;
+		int at = 0;
+		int index = 0;
+		while (at < pcm.length)
+		{
+			final int len = Math.min(perPacket, pcm.length - at);
+			final int samples = len / frameBytes;
+			track.addFrame(Packet.createPacket(ByteBuffer.wrap(pcm, at, len),
+				(long) index * rate, rate, samples, index, Packet.FrameType.KEY, null));
+			at += len;
+			index++;
+		}
+	}
+
 	private H264Writer()
 	{
 	}
@@ -271,7 +296,7 @@ final class H264Writer
 	 * @param cancelled checked between frames so a cancelled clip stops promptly.
 	 */
 	static void write(File out, List<RecordedFrame> frames, int fps, int quantiser,
-		BooleanSupplier cancelled)
+		byte[] audioPcm, BooleanSupplier cancelled)
 		throws IOException
 	{
 		if (frames.isEmpty())
@@ -314,6 +339,15 @@ final class H264Writer
 			// sample entry, so the bitstream headers do not have to be assembled by hand.
 			final MuxerTrack track = muxer.addVideoTrack(Codec.H264,
 				VideoCodecMeta.createSimpleVideoCodecMeta(new Size(width, height), ColorSpace.YUV420J));
+
+			// Added before any frame is written, because a muxer lays its track headers out first.
+			// PCM rather than AAC: there is no AAC encoder in pure Java, and uncompressed audio on
+			// a clip this size costs about 3MB against ninety - not worth a dependency to avoid.
+			final org.jcodec.containers.mp4.muxer.PCMMP4MuxerTrack audioTrack =
+				audioPcm != null && audioPcm.length > 0
+					? muxer.addPCMAudioTrack(new org.jcodec.common.AudioFormat(
+						AudioCapture.SAMPLE_RATE, 16, AudioCapture.CHANNELS, true, false))
+					: null;
 
 			ByteBuffer buffer = ByteBuffer.allocate(width * height * 3);
 			int index = 0;
@@ -412,6 +446,10 @@ final class H264Writer
 				pool.shutdownNow();
 			}
 
+			if (audioTrack != null)
+			{
+				writeAudio(audioTrack, audioPcm);
+			}
 			muxer.finish();
 		}
 		finally

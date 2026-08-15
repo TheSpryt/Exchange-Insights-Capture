@@ -80,6 +80,14 @@ class ClipRecorder
 	/** The client canvas' position and size on screen, for the screen-capture source. */
 	private Supplier<java.awt.Rectangle> canvasBounds = () -> null;
 	private java.awt.Robot robot;
+
+	/**
+	 * Microphone, rolling alongside the frames.
+	 *
+	 * <p>Started with capture rather than with a clip: the seconds before a trigger are the point
+	 * of a replay buffer, and they cannot be recorded after the fact any more than the picture can.
+	 */
+	private final AudioCapture audio = new AudioCapture();
 	/** Pointer position measured against the last screen grab; null when it was outside. */
 	private volatile java.awt.geom.Point2D.Double screenMouse;
 	/** True when the frame in flight came from the desktop rather than from the renderer. */
@@ -176,6 +184,17 @@ class ClipRecorder
 		final String stamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
 		final String clean = ClipStorage.safeName(subject == null ? "" : subject);
 		return clean.isEmpty() ? stamp : clean + " " + stamp;
+	}
+
+	/** Restart the microphone after a settings change - device, or switching it off. */
+	void refreshAudio()
+	{
+		if (!config.captureMicrophone())
+		{
+			audio.stop();
+			return;
+		}
+		audio.start(config.microphoneDevice(), Math.max(config.clipLength(), 30) + 5);
 	}
 
 	/** Told by the plugin whenever the logged-in character changes. */
@@ -317,6 +336,13 @@ class ClipRecorder
 		// a crash or a kill - and will never be resumed, so it is dead weight on disk.
 		sweepPartials();
 
+		if (config.captureMicrophone())
+		{
+			// Long enough to cover the longest clip the settings allow, so a clip never runs past
+			// the start of the sound.
+			audio.start(config.microphoneDevice(), Math.max(config.clipLength(), 30) + 5);
+		}
+
 		// One capture per frame the client actually draws, rather than a timer guessing at the
 		// rate. The listener runs ON THE RENDER THREAD, so it does the least work possible -
 		// claim a slot and hand off - because anything heavier there is exactly the stall this
@@ -368,6 +394,7 @@ class ClipRecorder
 
 	void stop()
 	{
+		audio.stop();
 		if (everyFrame != null)
 		{
 			drawManager.unregisterEveryFrameListener(everyFrame);
@@ -1158,7 +1185,13 @@ class ClipRecorder
 			// it invisible until it is finished, and also means a crash mid-encode cannot leave
 			// something behind that looks like a playable clip.
 			final File part = new File(dir, out.getName() + PART_SUFFIX);
-			ClipEncoder.encode(part, frames, fps, config.clipQuality().quantiser(),
+			// The soundtrack for exactly the span the frames cover, so picture and sound start
+			// together however long the encode queue was.
+			final byte[] pcm = audio.isRunning() && !frames.isEmpty()
+				? audio.range(frames.get(0).timestampMs, frames.get(frames.size() - 1).timestampMs)
+				: null;
+
+			ClipEncoder.encode(part, frames, fps, config.clipQuality().quantiser(), pcm,
 				() -> entry.cancelled);
 			if (entry.cancelled)
 			{

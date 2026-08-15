@@ -89,6 +89,14 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	private volatile long lastSavedAtMs = Long.MIN_VALUE;
 	private final Map<Skill, Integer> levels = new EnumMap<>(Skill.class);
 
+	/**
+	 * False until the character's real levels have been read after a login.
+	 *
+	 * <p>Without it, logging in looks like every skill levelling up at once, because the client
+	 * reports each one from zero as it fills them in.
+	 */
+	private boolean levelsReady;
+
 	private final HotkeyListener manualHotkey = new HotkeyListener(() -> config.manualHotkey())
 	{
 		@Override
@@ -96,7 +104,7 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		{
 			if (recorder != null && config.captureMode() == CaptureMode.AUTO)
 			{
-				recorder.trigger("manual");
+				triggerClip(ClipTrigger.MANUAL, "");
 			}
 		}
 	};
@@ -122,6 +130,10 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		uploader = new ClipUploader(config, configManager, httpClient, executor, this::notifyChat);
 		recorder = new ClipRecorder(config, drawManager, this::canCapture, this::mousePosition,
 			this::onClipSaved, this::onClipError);
+		recorder.setCanvasBounds(this::canvasBoundsOnScreen);
+		recorder.setPendingListener(this::panelRefreshClips);
+		// Old clips were previewed at 190px; re-send them now the generator makes 1280px ones.
+		uploader.backfillThumbnails();
 		recorder.setUploadHandler((file, temp) ->
 		{
 			final ClipUploader u = uploader;
@@ -136,11 +148,10 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		// to know which plugin's settings to open (see openConfigPanel).
 		overlay = new ExchangeInsightsCaptureOverlay(this, config, this::canCapture,
 			() -> recorder != null && recorder.isSessionActive(),
-			() -> recorder == null ? 0 : recorder.getPendingEncodes(),
-			() -> lastSavedAtMs);
+			() -> recorder == null ? 0 : recorder.getSavingCount());
 		overlayManager.add(overlay);
 
-		panel = new ExchangeInsightsCapturePanel(this, config, configManager, uploader);
+		panel = new ExchangeInsightsCapturePanel(this, config, configManager, uploader, executor);
 		final BufferedImage icon = ImageUtil.loadImageResource(ExchangeInsightsCapturePlugin.class, "/com/exchangeinsightscapture/icon.png");
 		navButton = NavigationButton.builder()
 			.tooltip("Exchange Insights Capture")
@@ -150,9 +161,28 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
+		// Show the real save path rather than an empty box. A @ConfigItem default has to be a
+		// compile-time constant, so the actual folder (which depends on RUNELITE_DIR) can only
+		// be filled in at runtime - otherwise the setting reads blank and nobody can tell where
+		// their clips went without checking the docs.
+		final String configured = config.outputDirectory();
+		if (configured == null || configured.trim().isEmpty())
+		{
+			configManager.setConfiguration(ExchangeInsightsCaptureConfig.GROUP, "outputDirectory",
+				ClipStorage.outputDir(config).getAbsolutePath());
+		}
+
 		keyManager.registerKeyListener(manualHotkey);
 		keyManager.registerKeyListener(manualToggleHotkey);
-		clientThread.invokeLater(this::snapshotLevels);
+
+		// Read the character now as well as on login. Enabling the plugin - or restarting the
+		// client into an auto-login - produces no LOGGED_IN event to react to, so waiting for one
+		// left the recorder with no account and its clips filed in the root of the save folder.
+		clientThread.invokeLater(() ->
+		{
+			snapshotLevels();
+			syncAccountFolder();
+		});
 	}
 
 	@Override
@@ -188,12 +218,144 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	 */
 	void openConfigPanel()
 	{
-		if (overlay != null)
+		if (overlay == null)
 		{
-			eventBus.post(new OverlayMenuClicked(
-				new OverlayMenuEntry(MenuAction.RUNELITE_OVERLAY_CONFIG, "Configure", "Exchange Insights Capture"),
-				overlay));
+			return;
 		}
+		eventBus.post(new OverlayMenuClicked(
+			new OverlayMenuEntry(MenuAction.RUNELITE_OVERLAY_CONFIG, "Configure", "Exchange Insights Capture"),
+			overlay));
+
+		// Land at the top of the settings, not halfway down them.
+		//
+		// The config page is built fresh each time and never scrolls itself, but something in its
+		// layout - a focusable field being made visible - leaves it partway into the trigger list,
+		// with the whole Recording section above the fold. Two invokeLaters, because the panel does
+		// not exist when the event is posted and is not laid out on the tick it is built.
+		javax.swing.SwingUtilities.invokeLater(() ->
+			javax.swing.SwingUtilities.invokeLater(this::scrollConfigToTop));
+	}
+
+	/**
+	 * Put RuneLite's config page back to the top.
+	 *
+	 * <p>Found by shape rather than by API, because none is offered: the visible scroll pane whose
+	 * contents come from RuneLite's config package. Deliberately silent if it finds nothing - this
+	 * is a cosmetic nicety, and a client update that moves those classes should cost a slightly
+	 * awkward scroll position rather than an exception every time the button is pressed.
+	 */
+	private void scrollConfigToTop()
+	{
+		try
+		{
+			for (java.awt.Window window : java.awt.Window.getWindows())
+			{
+				if (window.isShowing() && scrollToTopIn(window))
+				{
+					return;
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			log.debug("could not reset the config scroll position", e);
+		}
+	}
+
+	private boolean scrollToTopIn(java.awt.Container root)
+	{
+		for (java.awt.Component child : root.getComponents())
+		{
+			if (child instanceof javax.swing.JScrollPane && child.isShowing()
+				&& holdsConfigPage((javax.swing.JScrollPane) child))
+			{
+				((javax.swing.JScrollPane) child).getVerticalScrollBar().setValue(0);
+				return true;
+			}
+			if (child instanceof java.awt.Container && scrollToTopIn((java.awt.Container) child))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** True when anything inside this scroll pane belongs to RuneLite's config UI. */
+	private boolean holdsConfigPage(javax.swing.JScrollPane scroll)
+	{
+		final java.awt.Component view = scroll.getViewport().getView();
+		return view instanceof java.awt.Container && fromConfigPackage((java.awt.Container) view, 0);
+	}
+
+	private boolean fromConfigPackage(java.awt.Container container, int depth)
+	{
+		if (container.getClass().getName().startsWith("net.runelite.client.plugins.config."))
+		{
+			return true;
+		}
+		if (depth > 4)
+		{
+			return false;
+		}
+		for (java.awt.Component child : container.getComponents())
+		{
+			if (child.getClass().getName().startsWith("net.runelite.client.plugins.config."))
+			{
+				return true;
+			}
+			if (child instanceof java.awt.Container
+				&& fromConfigPackage((java.awt.Container) child, depth + 1))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Start a clip and tell the side panel immediately, so it can hold a slot for the clip
+	 * while it is captured and encoded. Without this the list would sit unchanged for the
+	 * half-minute an encode takes and only update once the file existed.
+	 */
+	private void triggerClip(ClipTrigger trigger, String subject)
+	{
+		final ClipRecorder r = recorder;
+		if (r == null)
+		{
+			return;
+		}
+		r.trigger(trigger, subject);
+		panelRefreshClips();
+	}
+
+	/** Push the current character's folder to the recorder. Must run on the client thread. */
+	private void syncAccountFolder()
+	{
+		final ClipRecorder r = recorder;
+		if (r != null)
+		{
+			r.setAccountFolder(accountFolder());
+		}
+	}
+
+	/**
+	 * The folder this character's clips belong in, e.g. "Spryt" or "Spryt-Demonic Pacts League".
+	 *
+	 * <p>Exactly how RuneLite names its screenshot folders, so the two sit side by side and a
+	 * league character never mixes in with the main account. Must be read on the client thread.
+	 */
+	private String accountFolder()
+	{
+		final net.runelite.api.Player local = client.getLocalPlayer();
+		if (local == null || local.getName() == null)
+		{
+			return null;
+		}
+		final net.runelite.client.config.RuneScapeProfileType profile =
+			net.runelite.client.config.RuneScapeProfileType.getCurrent(client);
+		return profile == net.runelite.client.config.RuneScapeProfileType.STANDARD
+			? local.getName()
+			: local.getName() + "-" + net.runelite.client.util.Text.titleCase(profile);
 	}
 
 	/** Current recorder state for the side panel, or null before startUp completes. */
@@ -220,6 +382,24 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		{
 			return;
 		}
+
+		// Say what linking actually does before doing any of it. This is the first moment the
+		// plugin would contact a server outside RuneLite, so the disclosure belongs here rather
+		// than buried in a setting the user has already skipped past. Declining contacts nobody.
+		final int consent = javax.swing.JOptionPane.showConfirmDialog(panel,
+			"<html><body style='width:280px'>Linking opens exchange-insights.gg so you can approve "
+				+ "this character."
+				+ "<br><br>This submits your IP address to a 3rd-party server not controlled or "
+				+ "verified by RuneLite developers. If you also turn on clip uploads, your saved "
+				+ "clips are sent there too."
+				+ "<br><br>Link this character now?</body></html>",
+			"Link Exchange Insights account", javax.swing.JOptionPane.OK_CANCEL_OPTION,
+			javax.swing.JOptionPane.QUESTION_MESSAGE);
+		if (consent != javax.swing.JOptionPane.OK_OPTION)
+		{
+			return;
+		}
+
 		// Claim the flag on the EDT before the client-thread round trip, so a double click
 		// cannot start two flows and open two browser tabs.
 		linking = true;
@@ -331,8 +511,11 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	{
 		if (token != null && !token.isEmpty())
 		{
-			// One shared slot, so every plugin in the family is linked by this one action -
-			// including any added later that has never heard of this one.
+			// Write our own key as well as the shared slot, matching what the Exchange Insights
+			// and Bank Templates plugins do when they perform a link. Neither of them mirrors a
+			// token linked elsewhere, so neither does this: the box is populated when THIS
+			// plugin did the linking, and stays empty when another one did.
+			configManager.setConfiguration(ExchangeInsightsCaptureConfig.GROUP, "eiAccountToken", token);
 			SharedAccountToken.set(configManager, token);
 		}
 		finishLinking();
@@ -477,6 +660,48 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	}
 
 	/**
+	 * Where the game canvas sits on the desktop, for the screen-capture source.
+	 *
+	 * <p>getLocationOnScreen throws if the component is not showing, which happens routinely
+	 * while the client is starting or minimised - so a null here simply means "skip this tick".
+	 */
+	/**
+	 * Where the game canvas sits on screen, or null when the screen is not safe to copy.
+	 *
+	 * <p>Screen capture copies a rectangle of the desktop, not the game - it has no idea what is
+	 * actually drawn there. So it is only offered while this window is the active one. Alt-tab to
+	 * a browser and that rectangle now contains the browser: the plugin would quietly record
+	 * whatever the player switched to, and put it in a clip they might upload.
+	 *
+	 * <p>Returning null is not a failure. The recorder falls back to asking the client for its own
+	 * rendered frames, which show the game regardless of what is in front of it - slower, but
+	 * correct and private. It also explains the "blank frames" warnings seen on Windows, where
+	 * capture was faithfully recording a minimised or covered window.
+	 */
+	private java.awt.Rectangle canvasBoundsOnScreen()
+	{
+		try
+		{
+			final java.awt.Canvas canvas = client.getCanvas();
+			if (canvas == null || !canvas.isShowing())
+			{
+				return null;
+			}
+			final java.awt.Window window = javax.swing.SwingUtilities.getWindowAncestor(canvas);
+			if (window == null || !window.isActive())
+			{
+				return null;
+			}
+			final java.awt.Point at = canvas.getLocationOnScreen();
+			return new java.awt.Rectangle(at.x, at.y, canvas.getWidth(), canvas.getHeight());
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+	}
+
+	/**
 	 * Mouse position as a fraction of the canvas (0..1 on each axis), or null if unknown.
 	 *
 	 * <p>Deliberately normalised rather than returned in pixels: the frame handed back by
@@ -523,9 +748,29 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	@Subscribe
 	public void onActorDeath(ActorDeath event)
 	{
-		if (config.onDeath() && event.getActor() == client.getLocalPlayer() && recorder != null)
+		if (recorder == null || !(event.getActor() instanceof net.runelite.api.Player))
 		{
-			recorder.trigger("death");
+			return;
+		}
+		final net.runelite.api.Player player = (net.runelite.api.Player) event.getActor();
+
+		if (player == client.getLocalPlayer())
+		{
+			if (config.onDeath())
+			{
+				triggerClip(ClipTrigger.DEATHS, "Death");
+			}
+			return;
+		}
+
+		// Someone else's death only matters if you know them - otherwise a busy area would clip
+		// constantly. Friends chat and clan are separate settings because they are separate
+		// groups of people, and plenty of players want one and not the other.
+		final boolean known = ((player.isFriendsChatMember() || player.isFriend()) && config.onFriendDeath())
+			|| (player.isClanMember() && config.onClanDeath());
+		if (known)
+		{
+			triggerClip(ClipTrigger.DEATHS, "Death " + player.getName());
 		}
 	}
 
@@ -541,9 +786,20 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 
 		int level = event.getLevel();
 		Integer previous = levels.put(skill, level);
-		if (config.onLevelUp() && previous != null && level > previous && recorder != null)
+
+		// Logging in fires one of these for every skill as the client fills them in, starting from
+		// zero - so attack arrives as 0 and then as 99, which is indistinguishable from ninety-nine
+		// levels gained at once. Nothing counts until the real levels have been read, which happens
+		// a tick after LOGGED_IN; the "previous > 0" test then covers any straggler, since no skill
+		// is ever genuinely levelled up from nothing.
+		if (!levelsReady || previous == null || previous <= 0)
 		{
-			recorder.trigger("level-" + skill.getName().toLowerCase() + "-" + level);
+			return;
+		}
+
+		if (config.onLevelUp() && level > previous && recorder != null)
+		{
+			triggerClip(ClipTrigger.LEVELS, skill.getName() + "(" + level + ")");
 		}
 	}
 
@@ -573,9 +829,161 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 
 		if (value >= config.valuableDropThreshold())
 		{
-			recorder.trigger(best != null ? "drop-" + best : "drop");
+			triggerClip(ClipTrigger.VALUABLE_DROPS,
+				best != null ? "Valuable drop " + best : "Valuable drop");
 		}
 	}
+
+	/**
+	 * Patterns lifted from RuneLite's screenshot plugin rather than written afresh.
+	 *
+	 * <p>These have absorbed years of corrections for message wording that changes between
+	 * updates and differs per boss. Rewriting them would mean rediscovering all of that, and
+	 * would drift from the plugin whose folder layout and file names this deliberately matches.
+	 */
+	private static final java.util.regex.Pattern BOSS_KILL = java.util.regex.Pattern.compile(
+		"Your (.+) (?:kill|success) count is: ?<col=[0-9a-f]{6}>([0-9,]+)</col>");
+	private static final java.util.regex.Pattern VALUABLE_DROP = java.util.regex.Pattern.compile(
+		".*Valuable drop: ([^<>]+?\\(((?:\\d+,?)+) coins\\))(?:</col>)?");
+	private static final java.util.regex.Pattern UNTRADEABLE_DROP = java.util.regex.Pattern.compile(
+		".*Untradeable drop: ([^<>]+)(?:</col>)?");
+	private static final java.util.regex.Pattern DUEL_END = java.util.regex.Pattern.compile(
+		"You have now (won|lost) ([0-9,]+) duels?\\.");
+	private static final java.util.regex.Pattern COMBAT_TASK = java.util.regex.Pattern.compile(
+		"Congratulations, you've completed an? (?<tier>\\w+) combat task: <col=[0-9a-f]+>(?<task>(.+))</col>");
+	private static final java.util.regex.Pattern NUMBER = java.util.regex.Pattern.compile("([,0-9]+)");
+	private static final String COLLECTION_LOG_TEXT = "New item added to your collection log: ";
+	private static final String CHEST_LOOTED_MESSAGE = "You find some treasure in the chest!";
+	private static final java.util.List<String> PET_MESSAGES = java.util.Arrays.asList(
+		"You have a funny feeling like you're being followed",
+		"You feel something weird sneaking into your backpack",
+		"You have a funny feeling like you would have been followed");
+
+	/**
+	 * Raids and chest bosses, which announce themselves differently from ordinary bosses.
+	 *
+	 * @return the clip name, e.g. "Chambers of Xeric(10)", or null if this is not one.
+	 */
+	private static String raidKill(String message)
+	{
+		final String plain = net.runelite.client.util.Text.removeTags(message);
+		final String boss;
+		if (plain.startsWith("Your completed Chambers of Xeric Challenge Mode count is:"))
+		{
+			boss = "Chambers of Xeric Challenge Mode";
+		}
+		else if (plain.startsWith("Your completed Chambers of Xeric count is:"))
+		{
+			boss = "Chambers of Xeric";
+		}
+		else if (plain.startsWith("Your completed Theatre of Blood"))
+		{
+			boss = plain.contains("Hard Mode") ? "Theatre of Blood Hard Mode"
+				: plain.contains("Story Mode") ? "Theatre of Blood Story Mode" : "Theatre of Blood";
+		}
+		else if (plain.startsWith("Your completed Tombs of Amascut"))
+		{
+			boss = plain.contains("Expert Mode") ? "Tombs of Amascut Expert Mode"
+				: plain.contains("Entry Mode") ? "Tombs of Amascut Entry Mode" : "Tombs of Amascut";
+		}
+		else if (plain.startsWith("Your Barrows chest count is"))
+		{
+			boss = "Barrows";
+		}
+		else if (plain.startsWith("Your Lunar Chest count is"))
+		{
+			boss = "Lunar Chest";
+		}
+		else
+		{
+			return null;
+		}
+
+		final java.util.regex.Matcher m = NUMBER.matcher(plain);
+		return m.find() ? boss + "(" + m.group().replace(",", "") + ")" : boss;
+	}
+
+	/**
+	 * A PvP kill, detected by receiving the victim's loot.
+	 *
+	 * <p>Not from their death: the client reports plenty of deaths you had nothing to do with,
+	 * and the loot is what actually says the kill was yours.
+	 */
+	@Subscribe
+	public void onPlayerLootReceived(net.runelite.client.events.PlayerLootReceived event)
+	{
+		if (recorder != null && config.onPvpKill())
+		{
+			triggerClip(ClipTrigger.PVP_KILLS, "Kill " + event.getPlayer().getName());
+		}
+	}
+
+	/**
+	 * Remember who a kick was aimed at.
+	 *
+	 * <p>The confirmation message that follows names nobody, so without catching the name here the
+	 * clip could only be called "Kick".
+	 */
+	@Subscribe
+	public void onScriptCallbackEvent(net.runelite.api.events.ScriptCallbackEvent e)
+	{
+		if (!"confirmFriendsChatKick".equals(e.getEventName()))
+		{
+			return;
+		}
+		final Object[] stack = client.getObjectStack();
+		final int size = client.getObjectStackSize();
+		if (size > 0 && stack[size - 1] instanceof String)
+		{
+			kickedPlayer = (String) stack[size - 1];
+		}
+	}
+
+	/**
+	 * Fill in the character's folder once the client actually knows who it is.
+	 *
+	 * <p>Reading it on the tick after LOGGED_IN is too early - the local player is not populated
+	 * yet, so it came back null and the clips that followed were filed in the root of the save
+	 * folder instead of under the account. Retried here until it is known, which costs a null
+	 * check a tick thereafter.
+	 */
+	@Subscribe
+	public void onGameTick(net.runelite.api.events.GameTick tick)
+	{
+		final ClipRecorder r = recorder;
+		if (r != null && r.needsAccountFolder())
+		{
+			final String folder = accountFolder();
+			if (folder != null)
+			{
+				r.setAccountFolder(folder);
+			}
+		}
+	}
+
+	@Subscribe
+	public void onWidgetLoaded(net.runelite.api.events.WidgetLoaded event)
+	{
+		if (recorder == null)
+		{
+			return;
+		}
+		// Only the two that announce themselves nowhere else. Everything the chat log reports is
+		// handled there instead, which fires on the event rather than on the reward screen - for a
+		// clip that matters, since the interesting footage is the fight, not the loot interface.
+		if (event.getGroupId() == net.runelite.api.gameval.InterfaceID.MISC_COLLECTION && config.onKingdom())
+		{
+			triggerClip(ClipTrigger.KINGDOM_REWARDS, "Kingdom " + java.time.LocalDate.now());
+		}
+		else if (event.getGroupId() == net.runelite.api.gameval.InterfaceID.WILDY_LOOT_CHEST
+			&& config.onWildernessLootChest())
+		{
+			triggerClip(ClipTrigger.WILDERNESS_LOOT_CHEST, "Loot chest");
+		}
+	}
+
+	/** Who was last kicked from the friends chat, so the confirmation can name them. */
+	private String kickedPlayer;
 
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
@@ -589,68 +997,165 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		{
 			case GAMEMESSAGE:
 			case SPAM:
+			case TRADE:
+			case FRIENDSCHATNOTIFICATION:
 			case MESBOX:
 				break;
 			default:
 				return;
 		}
 
-		String message = event.getMessage().toLowerCase();
+		final String message = event.getMessage();
 
-		if (config.onCollectionLog() && message.contains("added to your collection log"))
+		// Raids and chest bosses do not use the generic "kill count" wording, so they need their
+		// own patterns - otherwise the biggest kills in the game are the ones that never clip.
+		if (config.onBossKill())
 		{
-			// "New item added to your collection log: Twisted bow"
-			final String item = afterColon(event.getMessage());
-			recorder.trigger(item != null ? "collog-" + item : "collection-log");
+			final String raid = raidKill(message);
+			if (raid != null)
+			{
+				triggerClip(ClipTrigger.BOSS_KILLS, raid);
+				return;
+			}
 		}
-		else if (config.onPet()
-			&& (message.contains("funny feeling like you") || message.contains("weird sneaking into your backpack")))
+
+		// "You have completed 251 Treasure Trails." - the count and the tier both come from here.
+		if (config.onClueScroll() && message.contains("You have completed") && message.contains("Treasure"))
 		{
-			recorder.trigger("pet");
+			final java.util.regex.Matcher m = NUMBER.matcher(
+				net.runelite.client.util.Text.removeTags(message));
+			if (m.find())
+			{
+				final String plain = net.runelite.client.util.Text.removeTags(message);
+				final int at = plain.lastIndexOf(m.group()) + m.group().length() + 1;
+				final int end = plain.indexOf("Treasure");
+				final String tier = at < end ? plain.substring(at, end - 1) : "Clue";
+				triggerClip(ClipTrigger.CLUE_SCROLL_REWARDS,
+					tier + "(" + m.group().replace(",", "") + ")");
+				return;
+			}
 		}
-		else if (config.onQuestComplete() && message.contains("you've completed a quest"))
+
+		if (config.onBossKill())
 		{
-			final String quest = afterColon(event.getMessage());
-			recorder.trigger(quest != null ? "quest-" + quest : "quest");
+			final java.util.regex.Matcher m = BOSS_KILL.matcher(message);
+			if (m.find())
+			{
+				final String boss = net.runelite.client.util.Text.removeTags(m.group(1));
+				triggerClip(ClipTrigger.BOSS_KILLS, boss + "(" + m.group(2).replace(",", "") + ")");
+				return;
+			}
 		}
-		else if (config.onCombatAchievement() && message.contains("combat task"))
+
+		if (config.onChestLoot() && message.equals(CHEST_LOOTED_MESSAGE))
 		{
-			// "Congratulations, you've completed a hard combat task: Defence in Depth."
-			final String task = afterColon(event.getMessage());
-			recorder.trigger(task != null ? "combat-task-" + task : "combat-task");
+			triggerClip(ClipTrigger.CHEST_LOOT, "Chest");
+			return;
+		}
+
+		if (config.onPet() && PET_MESSAGES.stream().anyMatch(message::contains))
+		{
+			triggerClip(ClipTrigger.PETS, "Pet");
+			return;
+		}
+
+		if (config.onValuableDrop())
+		{
+			final java.util.regex.Matcher m = VALUABLE_DROP.matcher(message);
+			if (m.matches() && Integer.parseInt(m.group(2).replace(",", "")) >= config.valuableDropThreshold())
+			{
+				triggerClip(ClipTrigger.VALUABLE_DROPS, "Valuable drop " + m.group(1));
+				return;
+			}
+		}
+
+		if (config.onUntradeableDrop())
+		{
+			final java.util.regex.Matcher m = UNTRADEABLE_DROP.matcher(message);
+			if (m.matches())
+			{
+				triggerClip(ClipTrigger.UNTRADEABLE_DROPS, "Untradeable drop " + m.group(1));
+				return;
+			}
+		}
+
+		if (config.onDuel())
+		{
+			final java.util.regex.Matcher m = DUEL_END.matcher(message);
+			if (m.find())
+			{
+				triggerClip(ClipTrigger.DUELS,
+					"Duel " + m.group(1) + " (" + m.group(2).replace(",", "") + ")");
+				return;
+			}
+		}
+
+		if (config.onCollectionLog() && message.startsWith(COLLECTION_LOG_TEXT))
+		{
+			final String entry = net.runelite.client.util.Text.removeTags(message)
+				.substring(COLLECTION_LOG_TEXT.length());
+			triggerClip(ClipTrigger.COLLECTION_LOG, "Collection log (" + entry + ")");
+			return;
+		}
+
+		if (config.onCombatAchievement() && message.contains("combat task"))
+		{
+			final java.util.regex.Matcher m = COMBAT_TASK.matcher(message);
+			if (m.find())
+			{
+				triggerClip(ClipTrigger.COMBAT_ACHIEVEMENTS,
+					m.group("tier") + " combat task (" + net.runelite.client.util.Text.removeTags(m.group("task")) + ")");
+				return;
+			}
+		}
+
+		if (config.onLeagueTask() && message.contains("League Task Complete"))
+		{
+			triggerClip(ClipTrigger.LEAGUE_TASKS, "League task");
+			return;
+		}
+
+		if (config.onQuestComplete() && message.contains("you've completed a quest"))
+		{
+			final int colon = message.indexOf(':');
+			final String quest = colon >= 0 && colon + 1 < message.length()
+				? net.runelite.client.util.Text.removeTags(message.substring(colon + 1)).trim()
+				: null;
+			triggerClip(ClipTrigger.QUESTS, quest != null && !quest.isEmpty() ? quest : "Quest");
+			return;
+		}
+
+		if (config.onFriendsChatKick() && kickedPlayer != null
+			&& message.equals("Your request to kick/ban this user was successful."))
+		{
+			triggerClip(ClipTrigger.FRIENDS_CHAT_KICKS, "Kick " + kickedPlayer);
+			kickedPlayer = null;
 		}
 	}
-
-	/**
-	 * The part of a game message after its colon - the item, task or quest it names - with
-	 * any colour tags and trailing punctuation removed. Null when the message has no such tail.
-	 */
-	private static String afterColon(String message)
-	{
-		if (message == null)
-		{
-			return null;
-		}
-		final String plain = message.replaceAll("<[^>]*>", "");
-		final int colon = plain.indexOf(':');
-		if (colon < 0 || colon + 1 >= plain.length())
-		{
-			return null;
-		}
-		final String tail = plain.substring(colon + 1).trim().replaceAll("[.!]+$", "").trim();
-		return tail.isEmpty() ? null : tail;
-	}
-
-	// ------------------------------------------------------------------
-	// Lifecycle plumbing
-	// ------------------------------------------------------------------
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
-		if (event.getGameState() == GameState.LOGGED_IN)
+		final GameState state = event.getGameState();
+		if (state == GameState.LOGGED_IN)
 		{
-			clientThread.invokeLater(this::snapshotLevels);
+			clientThread.invokeLater(() ->
+			{
+				snapshotLevels();
+				syncAccountFolder();
+			});
+			return;
+		}
+
+		// A new session replays every skill from scratch, so whatever levels we are holding are
+		// about to be contradicted. Only the states that actually mean "starting again" count -
+		// LOADING fires on every region change while logged in, and resetting on that would keep
+		// throwing away the baseline a genuine level-up needs to be measured against.
+		if (state == GameState.LOGGING_IN || state == GameState.HOPPING
+			|| state == GameState.LOGIN_SCREEN || state == GameState.CONNECTION_LOST)
+		{
+			levelsReady = false;
+			levels.clear();
 		}
 	}
 
@@ -692,6 +1197,13 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		panelRefresh();
 	}
 
+	/**
+	 * Record the levels the character actually has, and only then start watching for changes.
+	 *
+	 * <p>Runs a tick after login rather than immediately, because the client has not populated the
+	 * skills at the moment the state changes. Until this has run, stat changes are recorded but
+	 * never treated as level-ups.
+	 */
 	@SuppressWarnings("deprecation") // Skill.OVERALL is deprecated but still returned by Skill.values().
 	private void snapshotLevels()
 	{
@@ -702,6 +1214,7 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 				levels.put(skill, client.getRealSkillLevel(skill));
 			}
 		}
+		levelsReady = true;
 	}
 
 	private void onClipSaved(File file)

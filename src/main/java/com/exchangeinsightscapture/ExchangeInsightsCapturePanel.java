@@ -40,6 +40,8 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 	private static final Color AMBER = new Color(96, 74, 30);
 	private static final Color NEUTRAL = new Color(60, 60, 60);
 	private static final Color MUTED = new Color(0x9E, 0x9E, 0x9E);
+	/** The gold the sibling panels use for their chevrons and view actions. */
+	private static final Color ICON_GOLD = new Color(0xE8, 0xC0, 0x50);
 
 	private final ExchangeInsightsCapturePlugin plugin;
 	private final ExchangeInsightsCaptureConfig config;
@@ -50,36 +52,68 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 	private final JPanel modeRow = new JPanel(new GridLayout(1, 3, 4, 0));
 	private final JPanel bindRow = new JPanel();
 	private final JPanel accountRow = new JPanel();
-	private final JLabel hint = new JLabel();
 	private final ClipListPanel clipList;
+	/** Same component the Bank Templates panel uses, so the two plugins look like a set. */
+	private final SearchBar search = new SearchBar();
+	private final javax.swing.JComboBox<String> sort =
+		new javax.swing.JComboBox<>(new String[]{"Newest first", "Oldest first"});
 
 	/** True while the bind button is armed and swallowing the next keypress. */
 	private boolean listeningForKey;
 	/** True while a browser device-link is in flight. */
 	private boolean linking;
 
-	ExchangeInsightsCapturePanel(ExchangeInsightsCapturePlugin plugin, ExchangeInsightsCaptureConfig config, ConfigManager configManager,
-		ClipUploader uploader)
+	ExchangeInsightsCapturePanel(ExchangeInsightsCapturePlugin plugin, ExchangeInsightsCaptureConfig config,
+		ConfigManager configManager, ClipUploader uploader,
+		java.util.concurrent.ScheduledExecutorService executor)
 	{
-		// wrap = false: this panel manages its own scrolling, so the settings button can be
-		// anchored in SOUTH and stay visible however long the clip list grows.
+		// Don't let PluginPanel wrap us in its own scrollpane - we manage our own so the
+		// settings button can stay pinned to the bottom while only the content scrolls.
+		// Same arrangement as the Bank Templates panel.
 		super(false);
 		this.plugin = plugin;
 		this.config = config;
 		this.configManager = configManager;
 		this.uploader = uploader;
-		this.clipList = new ClipListPanel(config, this::refreshClips);
+		this.executor = executor;
+		this.clipList = new ClipListPanel(config, this::refreshClips, executor,
+			() ->
+			{
+				final ClipRecorder r = plugin.getRecorder();
+				return r == null ? java.util.Collections.emptyList() : r.getPending();
+			},
+			(id, newName) ->
+			{
+				final ClipRecorder r = plugin.getRecorder();
+				if (r != null)
+				{
+					r.renamePending(id, newName);
+				}
+			},
+			id ->
+			{
+				final ClipRecorder r = plugin.getRecorder();
+				if (r != null)
+				{
+					r.cancelPending(id);
+				}
+			},
+			uploader);
 
-		setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+		// Narrower side padding than the default: with our own always-on scrollbar, 10px each
+		// side is what pushed content past the right edge.
+		setBorder(BorderFactory.createEmptyBorder(10, 8, 8, 8));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 		setLayout(new BorderLayout());
 
-		final JPanel body = new JPanel();
+		// A plain JPanel in a JScrollPane keeps its OWN preferred width. Anything wider than the
+		// viewport - a long label on one line, three mode buttons side by side - then made the
+		// view wider than the visible area and the right-hand edge was simply clipped, which is
+		// what kept pushing the mode buttons off screen. Tracking the viewport width forces the
+		// content to the visible width instead, so labels wrap and rows shrink to fit.
+		final JPanel body = new ScrollableColumn();
 		body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
 		body.setBackground(ColorScheme.DARK_GRAY_COLOR);
-
-		body.add(title("Exchange Insights Capture"));
-		body.add(Box.createVerticalStrut(8));
 
 		// Account first, as in the Bank Templates panel - it is the thing users look for.
 		accountRow.setLayout(new BoxLayout(accountRow, BoxLayout.Y_AXIS));
@@ -101,50 +135,151 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		modeRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
 		body.add(modeRow);
 
-		body.add(Box.createVerticalStrut(6));
+		// No leading gap here: the bind row supplies its own when it has something to show, and
+		// it is empty in every mode but Manual.
 		bindRow.setLayout(new BoxLayout(bindRow, BoxLayout.Y_AXIS));
 		bindRow.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		bindRow.setAlignmentX(Component.LEFT_ALIGNMENT);
 		body.add(bindRow);
 
-		body.add(Box.createVerticalStrut(6));
-		hint.setFont(FontManager.getRunescapeSmallFont());
-		hint.setForeground(MUTED);
-		hint.setAlignmentX(Component.LEFT_ALIGNMENT);
-		body.add(hint);
-
-		body.add(Box.createVerticalStrut(14));
+		// One gap, not three. This was 6 + 14 stacked on top of the leading strut above, so in
+		// Automatic mode - where the bind row renders nothing at all - it left 26 pixels of empty
+		// space between the mode buttons and the clips below.
+		body.add(Box.createVerticalStrut(8));
 		body.add(sectionLabel("Clips"));
 		body.add(Box.createVerticalStrut(4));
+
+		// Search and sort live out here rather than inside the list, because the list tears itself
+		// down and rebuilds on every refresh - and the poll refreshes it while you are typing.
+		// Rebuilt controls would lose the caret and whatever had been typed so far.
+		search.setAlignmentX(Component.LEFT_ALIGNMENT);
+		search.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+		search.setPreferredSize(new Dimension(100, 28));
+		search.addKeyListener(new KeyAdapter()
+		{
+			@Override
+			public void keyReleased(KeyEvent e)
+			{
+				clipList.setFilter(search.getText());
+			}
+		});
+		search.addClearListener(() -> clipList.setFilter(""));
+		body.add(search);
+		body.add(Box.createVerticalStrut(4));
+
+		styleCombo(sort);
+		sort.setAlignmentX(Component.LEFT_ALIGNMENT);
+		sort.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		sort.addActionListener(e -> clipList.setNewestFirst(sort.getSelectedIndex() == 0));
+		body.add(sort);
+		body.add(Box.createVerticalStrut(6));
+
 		clipList.setAlignmentX(Component.LEFT_ALIGNMENT);
+		// Unbounded height so BoxLayout hands the leftover viewport space to the clip list rather
+		// than sharing it out above; the list then has room to push its bottom pager down.
+		clipList.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 		body.add(clipList);
 
-		final JPanel scrollHost = new JPanel(new BorderLayout());
-		scrollHost.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		scrollHost.add(body, BorderLayout.NORTH);
-
-		final javax.swing.JScrollPane scroll = new javax.swing.JScrollPane(scrollHost,
-			javax.swing.ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
-			javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
-		scroll.setBorder(null);
-		scroll.getVerticalScrollBar().setUnitIncrement(16);
+		// Content scrolls; the settings button does not. The vertical bar is ALWAYS shown so
+		// card widths do not shift as the list grows past the fold.
+		final javax.swing.JScrollPane scroll = new javax.swing.JScrollPane(body,
+			javax.swing.JScrollPane.VERTICAL_SCROLLBAR_ALWAYS,
+			javax.swing.JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+		scroll.setBorder(BorderFactory.createEmptyBorder());
+		scroll.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+		ThinScrollBarUI.style(scroll);
 		add(scroll, BorderLayout.CENTER);
 
-		// Anchored footer: always reachable no matter how many clips are listed.
-		final JPanel footer = new JPanel(new BorderLayout());
-		footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		footer.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
+		final JPanel south = new JPanel();
+		south.setLayout(new BoxLayout(south, BoxLayout.Y_AXIS));
+		south.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		south.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
 		final JButton settings = styledButton("Open plugin settings", NEUTRAL);
 		settings.setToolTipText("Opens this plugin's configuration page.");
-		settings.setPreferredSize(new Dimension(10, 28));
+		settings.setAlignmentX(Component.LEFT_ALIGNMENT);
+		settings.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
 		settings.addActionListener(e -> plugin.openConfigPanel());
-		footer.add(settings, BorderLayout.CENTER);
-		add(footer, BorderLayout.SOUTH);
+		south.add(settings);
+
+		add(south, BorderLayout.SOUTH);
+
+		// The list tells us when the account changed; that is when the usage figures are stale.
+		clipList.setQuotaListener(this::refreshQuota);
+		// Upload progress arrives per 64KB chunk; repainting on each would flood the EDT, so
+		// the list is redrawn at most a few times a second.
+		uploader.setProgressListener(this::onUploadProgress);
 
 		refresh();
 		refreshClips();
 		refreshQuota();
+		refreshCloud();
+	}
+
+	/**
+	 * Dress a combo the way the Bank Templates panel dresses its sort dropdowns: rounded body, gold
+	 * chevron, RuneScape font, and a popup whose rows match the panel rather than the system theme.
+	 */
+	private static void styleCombo(javax.swing.JComboBox<String> combo)
+	{
+		combo.setUI(new javax.swing.plaf.basic.BasicComboBoxUI()
+		{
+			@Override
+			protected JButton createArrowButton()
+			{
+				final JButton arrow = new JButton()
+				{
+					@Override
+					protected void paintComponent(Graphics g)
+					{
+						final java.awt.Graphics2D g2 = (java.awt.Graphics2D) g.create();
+						g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
+							java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+						g2.setColor(ICON_GOLD);
+						g2.setStroke(new java.awt.BasicStroke(1.8f, java.awt.BasicStroke.CAP_ROUND,
+							java.awt.BasicStroke.JOIN_ROUND));
+						final int cx = getWidth() / 2;
+						final int cy = getHeight() / 2;
+						g2.drawLine(cx - 4, cy - 2, cx, cy + 2);
+						g2.drawLine(cx + 4, cy - 2, cx, cy + 2);
+						g2.dispose();
+					}
+				};
+				arrow.setBorder(BorderFactory.createEmptyBorder());
+				arrow.setContentAreaFilled(false);
+				arrow.setFocusable(false);
+				return arrow;
+			}
+
+			// Non-opaque so the body can be painted with the cards' rounded corners instead of the
+			// square fill the look-and-feel would draw.
+			@Override
+			public void paintCurrentValueBackground(Graphics g, java.awt.Rectangle bounds, boolean hasFocus)
+			{
+				RoundedBorder.fill(g, comboBox, comboBox.getBackground());
+			}
+		});
+		combo.setOpaque(false);
+		combo.setFocusable(false);
+		combo.setFont(FontManager.getRunescapeFont());
+		combo.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		combo.setForeground(Color.WHITE);
+		combo.setBorder(new RoundedBorder(ColorScheme.MEDIUM_GRAY_COLOR, new Insets(3, 8, 3, 3)));
+		combo.setRenderer(new javax.swing.DefaultListCellRenderer()
+		{
+			@Override
+			public Component getListCellRendererComponent(javax.swing.JList<?> list, Object value,
+				int index, boolean selected, boolean focused)
+			{
+				final JLabel row = (JLabel) super.getListCellRendererComponent(list, value, index,
+					selected, focused);
+				row.setFont(FontManager.getRunescapeFont());
+				row.setBorder(BorderFactory.createEmptyBorder(4, 7, 4, 7));
+				row.setBackground(selected ? ColorScheme.MEDIUM_GRAY_COLOR : ColorScheme.DARKER_GRAY_COLOR);
+				row.setForeground(selected ? Color.WHITE : ColorScheme.LIGHT_GRAY_COLOR);
+				return row;
+			}
+		});
 	}
 
 	/** Called by the plugin as the link flow progresses, so the button reflects it. */
@@ -152,6 +287,26 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 	{
 		linking = value;
 		refresh();
+	}
+
+	/** How often the open panel re-reads the server. Cheap: one small request, and none at all
+	 *  when the account is not linked, since the listing short-circuits without a token. */
+	private static final int POLL_SECONDS = 20;
+
+	private final java.util.concurrent.ScheduledExecutorService executor;
+	private java.util.concurrent.ScheduledFuture<?> poll;
+
+	private long lastProgressPaintMs;
+
+	private void onUploadProgress()
+	{
+		final long now = System.currentTimeMillis();
+		if (now - lastProgressPaintMs < 250)
+		{
+			return;
+		}
+		lastProgressPaintMs = now;
+		SwingUtilities.invokeLater(this::refreshClips);
 	}
 
 	/** Re-read the clip folder and redraw the list. */
@@ -166,6 +321,44 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 	void refreshQuota()
 	{
 		uploader.refreshQuota(() -> SwingUtilities.invokeLater(this::refresh));
+	}
+
+	/** Re-read both the account's clip list and its usage. */
+	void refreshCloud()
+	{
+		clipList.refreshRemote();
+	}
+
+	/**
+	 * Keep the list current while the user is looking at it.
+	 *
+	 * <p>Clips are not only created here. One can be deleted from the website or another client,
+	 * or dropped server-side when the account goes over its allowance, and none of that reaches
+	 * this client on its own - so before these hooks the panel showed whatever was true when the
+	 * client started. Opening the tab now re-reads immediately, and a poll keeps it honest for as
+	 * long as it stays open.
+	 */
+	@Override
+	public void onActivate()
+	{
+		refreshCloud();
+		if (poll == null || poll.isCancelled())
+		{
+			poll = executor.scheduleWithFixedDelay(
+				() -> SwingUtilities.invokeLater(clipList::refreshRemoteIfChanged),
+				POLL_SECONDS, POLL_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+		}
+	}
+
+	/** Closed tab, no polling: an unopened panel should cost nothing. */
+	@Override
+	public void onDeactivate()
+	{
+		if (poll != null)
+		{
+			poll.cancel(false);
+			poll = null;
+		}
 	}
 
 	/** Rebuild the dynamic rows from current state. Must be called on the EDT. */
@@ -275,7 +468,7 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		final ClipRecorder recorder = plugin.getRecorder();
 		final CaptureMode mode = config.captureMode();
 
-		final int saving = recorder == null ? 0 : recorder.getPendingEncodes();
+		final int saving = recorder == null ? 0 : recorder.getSavingCount();
 
 		final String text;
 		final Color color;
@@ -294,7 +487,7 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		{
 			if (recorder != null && recorder.isSessionActive())
 			{
-				final int seconds = recorder.getSessionFrameCount() / Math.max(1, config.framerate());
+				final int seconds = recorder.getSessionSeconds();
 				text = "Recording  " + formatDuration(seconds);
 				color = RED;
 			}
@@ -311,7 +504,7 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		}
 		else
 		{
-			text = "Armed - buffering";
+			text = "Armed - capturing";
 			color = GREEN;
 		}
 
@@ -353,19 +546,6 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 			modeRow.add(b);
 		}
 
-		final CaptureMode mode = config.captureMode();
-		if (mode == CaptureMode.MANUAL)
-		{
-			hint.setText("<html>Nothing is captured until you arm a take.</html>");
-		}
-		else if (mode == CaptureMode.AUTO)
-		{
-			hint.setText("<html>Buffering continuously. Lower the framerate if your FPS drops.</html>");
-		}
-		else
-		{
-			hint.setText("<html>Nothing is being captured.</html>");
-		}
 	}
 
 	private void refreshAccount()
@@ -425,20 +605,79 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 			return;
 		}
 
-		accountRow.add(Box.createVerticalStrut(6));
-		final JLabel tier = new JLabel(q.isPremium() ? "Premium" : "Free");
+		accountRow.add(Box.createVerticalStrut(10));
+		accountRow.add(sectionLabel("Cloud storage"));
+		accountRow.add(Box.createVerticalStrut(4));
+		final JLabel tier = new JLabel("Account tier: " + (q.isPremium() ? "Premium" : "Free"));
 		tier.setFont(FontManager.getRunescapeSmallFont());
 		tier.setForeground(q.isPremium() ? new Color(0xE8, 0xC0, 0x50) : MUTED);
 		tier.setAlignmentX(Component.LEFT_ALIGNMENT);
 		accountRow.add(tier);
 
-		accountRow.add(Box.createVerticalStrut(3));
-		accountRow.add(usageBar(q.used.clips, q.quota.clips,
-			q.used.clips + " / " + q.quota.clips + " clips"));
+		// The account is full and the server has actually refused something. Said here, at the top
+		// of the panel, because the alternative is a player noticing weeks later that nothing has
+		// reached their account - the upload is a background job with no other visible failure.
+		if (uploader.isCloudFull())
+		{
+			accountRow.add(Box.createVerticalStrut(6));
+			accountRow.add(storageFullNotice());
+		}
+
+		// One bar, because there is now one limit. The account used to carry a clip-count limit
+		// too, and it never bound - space ran out first every time - so the second bar only
+		// invited the question of which number actually mattered.
 		accountRow.add(Box.createVerticalStrut(3));
 		accountRow.add(usageBar(q.used.bytes, q.quota.bytes,
 			formatBytes(q.used.bytes) + " / " + formatBytes(q.quota.bytes)));
 
+		accountRow.add(Box.createVerticalStrut(3));
+		final JLabel count = new JLabel(q.used.clips == 1 ? "1 clip uploaded"
+			: q.used.clips + " clips uploaded");
+		count.setFont(FontManager.getRunescapeSmallFont());
+		count.setForeground(MUTED);
+		count.setAlignmentX(Component.LEFT_ALIGNMENT);
+		accountRow.add(count);
+	}
+
+	/**
+	 * The "cloud storage is full" row: what happened, and one click to somewhere it can be fixed.
+	 *
+	 * <p>Clickable as a whole rather than hiding the action behind a small icon - the point is that
+	 * it cannot be missed, and a row that looks like a notice but only responds on one glyph is a
+	 * worse version of both.
+	 */
+	private JPanel storageFullNotice()
+	{
+		final JPanel row = new JPanel(new BorderLayout(6, 0));
+		row.setBackground(new Color(0x4A, 0x2A, 0x2A));
+		row.setAlignmentX(Component.LEFT_ALIGNMENT);
+		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 64));
+		row.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+		row.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+		final JLabel text = new JLabel("<html><body style='width:135px'><b>Cloud storage full</b><br>"
+			+ "New clips are staying on this computer. Click to manage your clips or change what "
+			+ "happens when it fills.</body></html>");
+		text.setFont(FontManager.getRunescapeSmallFont());
+		text.setForeground(Color.WHITE);
+		row.add(text, BorderLayout.CENTER);
+
+		final JLabel go = new JLabel(new SyncIcon(SyncIcon.Kind.REVEAL, true));
+		go.setToolTipText("Open your clips on exchange-insights.gg");
+		row.add(go, BorderLayout.EAST);
+
+		final java.awt.event.MouseAdapter open = new java.awt.event.MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(java.awt.event.MouseEvent e)
+			{
+				net.runelite.client.util.LinkBrowser.browse("https://exchange-insights.gg/#clips");
+			}
+		};
+		row.addMouseListener(open);
+		text.addMouseListener(open);
+		go.addMouseListener(open);
+		return row;
 	}
 
 	/** A slim fill bar with its numbers on top; amber past 80%, red when full. */
@@ -529,6 +768,52 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		l.setForeground(MUTED);
 		l.setAlignmentX(Component.LEFT_ALIGNMENT);
 		return l;
+	}
+
+	/** A column that never grows wider than the scroll viewport showing it. */
+	private static final class ScrollableColumn extends JPanel implements javax.swing.Scrollable
+	{
+		@Override
+		public Dimension getPreferredScrollableViewportSize()
+		{
+			return getPreferredSize();
+		}
+
+		@Override
+		public int getScrollableUnitIncrement(java.awt.Rectangle r, int orientation, int direction)
+		{
+			return 16;
+		}
+
+		@Override
+		public int getScrollableBlockIncrement(java.awt.Rectangle r, int orientation, int direction)
+		{
+			return r.height;
+		}
+
+		/** The whole point: never wider than the viewport. */
+		@Override
+		public boolean getScrollableTracksViewportWidth()
+		{
+			return true;
+		}
+
+		/**
+		 * Fill the viewport when the content is shorter than it.
+		 *
+		 * <p>This is what lets the clip list push its bottom pager to the foot of the panel. A
+		 * glue only absorbs space its container actually has, and without this the column is
+		 * exactly as tall as its contents - so the glue got nothing and the pager rode up under
+		 * the last card. Once the content is taller than the viewport this goes back to false and
+		 * normal scrolling resumes.
+		 */
+		@Override
+		public boolean getScrollableTracksViewportHeight()
+		{
+			final java.awt.Container parent = getParent();
+			return parent instanceof javax.swing.JViewport
+				&& parent.getHeight() > getPreferredSize().height;
+		}
 	}
 
 	/** Filled, rounded, bold - the same control family the Bank Templates panel uses. */

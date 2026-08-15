@@ -1,5 +1,6 @@
 package com.exchangeinsightscapture;
 
+import java.awt.AWTError;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.Image;
@@ -43,22 +44,64 @@ import net.runelite.client.ui.DrawManager;
 @Slf4j
 class ClipRecorder
 {
+	private static final String PART_SUFFIX = ClipStorage.PART_SUFFIX;
+
+	/** How long capture must return nothing but flat colour before Robot is set aside. */
+	private static final long BLANK_MS_BEFORE_FALLBACK = 10_000;
+
+	/** How long to stay on the fallback before giving Robot another chance. */
+	private static final long SCREEN_GRAB_RETRY_MS = 60_000;
+
 	private static final long COOLDOWN_MS = 1500;
 	private static final long EVICT_SLACK_MS = 750;
 	/** If a requested frame never arrives (client not rendering), re-arm after this long. */
 	private static final long FRAME_REQUEST_TIMEOUT_MS = 2000;
+	/** Floor for the adaptive buffer quality; below this the intermediate step starts to show. */
+	private static final float MIN_BUFFER_QUALITY = 0.6f;
+
+	/**
+	 * Ceiling for the buffer's JPEG quality.
+	 *
+	 * <p>Not 1.0, which is what this used to sit at. Measured on real captured frames at
+	 * 1310x720: quality 1.0 costs 629KB a frame against 134KB at 0.8 - nearly five times the
+	 * memory - because the top of the JPEG scale all but disables quantisation. That is spent on
+	 * an intermediate frame which H.264 then re-compresses anyway, so none of it reaches the clip.
+	 *
+	 * <p>It was also the reason the buffer kept hitting its ceiling and truncating the lead-up: at
+	 * 80fps, fifteen seconds at 1.0 needs 736MB. At this setting the same window is under 200MB,
+	 * and the adaptive step-down rarely has to intervene at all.
+	 */
+	private static final float MAX_BUFFER_QUALITY = 0.85f;
 
 	private final ExchangeInsightsCaptureConfig config;
 	private final DrawManager drawManager;
 	private final BooleanSupplier canCapture;
 	private final Supplier<java.awt.geom.Point2D.Double> mousePosition;
+	/** The client canvas' position and size on screen, for the screen-capture source. */
+	private Supplier<java.awt.Rectangle> canvasBounds = () -> null;
+	private java.awt.Robot robot;
+	/** Pointer position measured against the last screen grab; null when it was outside. */
+	private volatile java.awt.geom.Point2D.Double screenMouse;
+	/** True when the frame in flight came from the desktop rather than from the renderer. */
+	private volatile boolean lastFrameWasScreen;
 	private final Consumer<File> onSaved;
 	private final Consumer<String> onError;
+	/** Told when a pending clip changes state, so the side panel can redraw it. */
+	private Runnable onPendingChanged = () -> { };
+
+	void setPendingListener(Runnable listener)
+	{
+		this.onPendingChanged = listener;
+	}
+
 	/** Receives the file to upload plus whether it is a throwaway that should be deleted after. */
 	private java.util.function.BiConsumer<File, Boolean> onUploadReady = (f, tmp) -> { };
 
 	private ScheduledExecutorService scheduler;
 	private ThreadPoolExecutor workers;
+	/** Performs the screen grab, off the render thread. */
+	private ThreadPoolExecutor grabber;
+	private Runnable everyFrame;
 	private ThreadPoolExecutor processor;
 	private ThreadPoolExecutor encoder;
 
@@ -67,6 +110,7 @@ class ClipRecorder
 	// Mirrors manual-session state for the overlay and side panel.
 	private volatile boolean sessionActive;
 	private volatile int sessionFrameCount;
+	private volatile long sessionStartedMs;
 	// Clips queued or currently being written. Encoding takes far longer than capture, so this
 	// is what the user is actually waiting on once the red "recording" phase ends.
 	private final AtomicInteger pendingEncodes = new AtomicInteger();
@@ -91,7 +135,146 @@ class ClipRecorder
 	private long postRollEndMs;
 	private List<RecordedFrame> activeClip;
 	private String activeReason;
+	private PendingClip activePending;
 	private long lastClipMs;
+	/** Bytes held in the rolling buffer, tracked rather than recomputed each frame. */
+	private long bufferedBytes;
+	private long lastTrimWarnMs;
+	/**
+	 * Quality of the in-memory JPEG buffer, adjusted automatically.
+	 *
+	 * <p>There is deliberately no setting for this. It was removed because at a fixed capture
+	 * rate the memory cost was predictable, but capture now follows the client - so the same
+	 * buffer holds four times as much at 240fps as at 60. Left at maximum it fills the memory
+	 * ceiling and the oldest frames get dropped, which silently shortens the lead-up that is
+	 * the entire point of a replay buffer.
+	 *
+	 * <p>Trading a little buffer quality for keeping the full window is the better bargain, and
+	 * it only happens under pressure: with headroom this sits at maximum. The loss is in an
+	 * intermediate step that H.264 re-compresses anyway.
+	 */
+	private volatile float bufferQuality = MAX_BUFFER_QUALITY;
+
+	/**
+	 * The folder clips file under for the logged-in character, e.g. "Spryt-Demonic Pacts League".
+	 *
+	 * <p>Pushed in by the plugin rather than read on demand: the client's player can only be read
+	 * safely on the client thread, and clips finish encoding long after - often once the player
+	 * has logged out entirely.
+	 */
+	private volatile String accountFolder;
+
+	/**
+	 * "Zulrah(150) 2026-08-14_21-30-00", matching how RuneLite names screenshots.
+	 *
+	 * <p>Subject first so a folder sorts by what happened and then by when; the timestamp both
+	 * disambiguates and says at a glance which of two Zulrah clips is which. A clip with nothing
+	 * to say for itself - a manual capture - is just the timestamp.
+	 */
+	private static String clipName(String subject)
+	{
+		final String stamp = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date());
+		final String clean = ClipStorage.safeName(subject == null ? "" : subject);
+		return clean.isEmpty() ? stamp : clean + " " + stamp;
+	}
+
+	/** Told by the plugin whenever the logged-in character changes. */
+	void setAccountFolder(String folder)
+	{
+		this.accountFolder = folder;
+	}
+
+	/** True while the character is still unknown, so the plugin knows to keep trying. */
+	boolean needsAccountFolder()
+	{
+		return accountFolder == null || accountFolder.isEmpty();
+	}
+
+	/**
+	 * A clip the user is waiting on: named and listable from the moment its trigger fires,
+	 * long before a file exists. Giving it identity up front is what lets the side panel
+	 * show, rename and cancel a clip that is still being captured or encoded.
+	 */
+	static final class PendingClip
+	{
+		final long id;
+		final String reason;
+		/** Which folder this clip files itself under, and under which account. */
+		final ClipTrigger trigger;
+		final String account;
+		/** File name without extension. Mutable: the user may rename before it is written. */
+		volatile String name;
+		volatile boolean cancelled;
+		/** True once the encoder has started writing, after which cancelling deletes the part-file. */
+		volatile boolean encoding;
+
+		PendingClip(long id, String reason, String name, ClipTrigger trigger, String account)
+		{
+			this.id = id;
+			this.reason = reason;
+			this.name = name;
+			this.trigger = trigger;
+			this.account = account;
+		}
+	}
+
+	private final java.util.concurrent.atomic.AtomicLong pendingIds = new java.util.concurrent.atomic.AtomicLong();
+	/** Copy-on-write: the panel iterates this from the EDT while the recorder mutates it. */
+	private final java.util.List<PendingClip> pending = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+	/** Clips currently being captured or encoded, oldest first. */
+	java.util.List<PendingClip> getPending()
+	{
+		return java.util.Collections.unmodifiableList(pending);
+	}
+
+	/** Rename a clip that has not been written yet. Safe from any thread. */
+	void renamePending(long id, String name)
+	{
+		for (PendingClip p : pending)
+		{
+			if (p.id == id)
+			{
+				p.name = name;
+				return;
+			}
+		}
+	}
+
+	/**
+	 * Cancel a pending clip. If it is still being captured the take is abandoned; if it is
+	 * queued it is skipped; if it is already encoding the encoder notices between frames and
+	 * removes the part-file.
+	 */
+	void cancelPending(long id)
+	{
+		for (PendingClip p : pending)
+		{
+			if (p.id == id)
+			{
+				p.cancelled = true;
+				break;
+			}
+		}
+		final ThreadPoolExecutor proc = processor;
+		if (proc != null && !proc.isShutdown())
+		{
+			proc.execute(() -> abortIfCancelled(id));
+		}
+	}
+
+	/** Processor thread: drop an in-flight capture whose clip was cancelled. */
+	private void abortIfCancelled(long id)
+	{
+		if (activePending != null && activePending.id == id && capturing)
+		{
+			capturing = false;
+			recording = false;
+			activeClip = null;
+			pending.remove(activePending);
+			activePending = null;
+		}
+	}
 
 	// Manual mode: a single take that accumulates every frame from arm to disarm,
 	// rather than the rolling window. Bounded by maxManualLength so a forgotten
@@ -109,6 +292,11 @@ class ClipRecorder
 		this.onError = onError;
 	}
 
+	void setCanvasBounds(Supplier<java.awt.Rectangle> bounds)
+	{
+		this.canvasBounds = bounds;
+	}
+
 	void setUploadHandler(java.util.function.BiConsumer<File, Boolean> handler)
 	{
 		this.onUploadReady = handler;
@@ -117,6 +305,7 @@ class ClipRecorder
 	void start()
 	{
 		scheduler = Executors.newSingleThreadScheduledExecutor(r -> namedDaemon(r, "instant-replay-capture"));
+		grabber = singleThread("instant-replay-grab");
 		// Scale + JPEG for several frames at once. Capped well below the core count: this runs
 		// alongside the game, and the goal is to stop frames queueing, not to hog the CPU.
 		final int poolSize = Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 4));
@@ -124,12 +313,67 @@ class ClipRecorder
 		processor = singleThread("instant-replay-processor");
 		encoder = singleThread("instant-replay-encoder");
 
-		long periodMs = Math.max(1, 1000L / Math.max(1, config.framerate()));
-		scheduler.scheduleAtFixedRate(this::captureTick, 0, periodMs, TimeUnit.MILLISECONDS);
+		// Anything left wearing the in-progress suffix is from an encode that never finished -
+		// a crash or a kill - and will never be resumed, so it is dead weight on disk.
+		sweepPartials();
+
+		// One capture per frame the client actually draws, rather than a timer guessing at the
+		// rate. The listener runs ON THE RENDER THREAD, so it does the least work possible -
+		// claim a slot and hand off - because anything heavier there is exactly the stall this
+		// plugin spent so long removing.
+		everyFrame = this::onClientFrame;
+		drawManager.registerEveryFrameListener(everyFrame);
+
+		// The scheduler now only finalises clips whose post-roll has elapsed, which still has
+		// to happen once the client stops drawing entirely (logout, minimised).
+		scheduler.scheduleAtFixedRate(this::postRollTick, 250, 250, TimeUnit.MILLISECONDS);
+	}
+
+	/** Delete half-written clips left behind by an encode that did not complete. */
+	private void sweepPartials()
+	{
+		try
+		{
+			sweepPartials(outputDir(), 0);
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("could not sweep unfinished clips", e);
+		}
+	}
+
+	/** Walks the account and category folders clips are filed into. Bounded, like every walk here. */
+	private void sweepPartials(File dir, int depth)
+	{
+		final File[] found = dir.listFiles();
+		if (found == null)
+		{
+			return;
+		}
+		for (File f : found)
+		{
+			if (f.isFile() && f.getName().endsWith(PART_SUFFIX))
+			{
+				if (f.delete())
+				{
+					log.debug("removed unfinished clip {}", f.getName());
+				}
+			}
+			else if (f.isDirectory() && depth < 2)
+			{
+				sweepPartials(f, depth + 1);
+			}
+		}
 	}
 
 	void stop()
 	{
+		if (everyFrame != null)
+		{
+			drawManager.unregisterEveryFrameListener(everyFrame);
+			everyFrame = null;
+		}
+
 		// An ImageWriter locks itself to the thread that used it, so disposing the cached
 		// JPEG writer from here (the client thread) throws IllegalStateException. Hand the
 		// disposal back to the processor thread that owns it, before anything is shut down.
@@ -152,14 +396,17 @@ class ClipRecorder
 		}
 
 		shutdown(scheduler);
+		shutdown(grabber);
 		shutdown(workers);
 		shutdown(processor);
 		shutdown(encoder);
 		scheduler = null;
+		grabber = null;
 		workers = null;
 		processor = null;
 		encoder = null;
 		buffer.clear();
+		bufferedBytes = 0;
 		capturing = false;
 		recording = false;
 		activeClip = null;
@@ -167,6 +414,8 @@ class ClipRecorder
 		sessionActive = false;
 		sessionFrameCount = 0;
 		pendingEncodes.set(0);
+		pending.clear();
+		activePending = null;
 		framePending.set(false);
 	}
 
@@ -208,16 +457,38 @@ class ClipRecorder
 		return pendingEncodes.get();
 	}
 
+	/**
+	 * Clips the user is waiting on: those encoding, PLUS one still collecting its post-event
+	 * padding.
+	 *
+	 * <p>The padding is part of producing the clip, not a separate state - so from the moment a
+	 * trigger fires the answer to "is it doing something about my keypress" is yes. Counting
+	 * only queued encodes meant the overlay sat unchanged for the whole post-roll and the press
+	 * looked like it had been ignored.
+	 */
+	int getSavingCount()
+	{
+		return pending.size();
+	}
+
 	/** Whether a manual take is armed and accumulating frames. */
 	boolean isSessionActive()
 	{
 		return sessionActive;
 	}
 
-	/** Frames captured so far in the current manual take; divide by framerate for its length. */
+	/** Frames captured so far in the current manual take. */
 	int getSessionFrameCount()
 	{
 		return sessionFrameCount;
+	}
+
+	/** Elapsed length of the current manual take, in seconds. Wall-clock rather than derived
+	 *  from a frame count, because the capture rate now varies with the client. */
+	int getSessionSeconds()
+	{
+		final long started = sessionStartedMs;
+		return started <= 0 ? 0 : (int) ((System.currentTimeMillis() - started) / 1000L);
 	}
 
 	/** Arm a manual take. Safe to call from any thread. */
@@ -236,52 +507,49 @@ class ClipRecorder
 		final ThreadPoolExecutor p = processor;
 		if (p != null && !p.isShutdown())
 		{
-			p.execute(() -> finishSession("manual"));
+			final String account = accountFolder;
+			p.execute(() -> finishSession(ClipTrigger.MANUAL, "", account));
 		}
 	}
 
 	/**
-	 * Re-arm capture at a new framerate: the rolling buffer is discarded and refills at
-	 * the new rate, which is what changing the setting should mean - a buffer holding a
-	 * mix of two sample rates would play back at the wrong speed.
+	 * Discard the rolling buffer and start collecting again.
 	 *
-	 * <p>Unlike a full stop/start this keeps the processor and encoder pools alive, so a
-	 * clip already being encoded survives the change, and the buffer is cleared ON the
-	 * processor thread rather than from the caller's, which is the only thread that owns it.
+	 * <p>Kept for the cases that genuinely invalidate what is buffered - a client resize, or
+	 * leaving a capture mode. Capture itself no longer needs re-arming, because it follows the
+	 * client's frames rather than a timer that had to be rebuilt at a new period.
 	 */
 	void restartCapture()
 	{
-		final ScheduledExecutorService old = scheduler;
-		if (old != null)
-		{
-			old.shutdownNow();
-		}
-
 		final ThreadPoolExecutor p = processor;
 		if (p != null && !p.isShutdown())
 		{
 			p.execute(() ->
 			{
 				buffer.clear();
+				bufferedBytes = 0;
 				capturing = false;
 				recording = false;
 				activeClip = null;
 			});
 		}
-
 		framePending.set(false);
-		scheduler = Executors.newSingleThreadScheduledExecutor(r -> namedDaemon(r, "instant-replay-capture"));
-		final long periodMs = Math.max(1, 1000L / Math.max(1, config.framerate()));
-		scheduler.scheduleAtFixedRate(this::captureTick, 0, periodMs, TimeUnit.MILLISECONDS);
 	}
 
 	/** Request a clip; safe to call from any thread (e.g. the client thread). */
-	void trigger(String reason)
+	/**
+	 * Request a clip.
+	 *
+	 * @param trigger  which category it files under.
+	 * @param subject  what to call it - "Zulrah(150)", "Attack(99)" - or empty for just a time.
+	 */
+	void trigger(ClipTrigger trigger, String subject)
 	{
 		final ThreadPoolExecutor p = processor;
 		if (p != null && !p.isShutdown())
 		{
-			p.execute(() -> beginClip(reason));
+			final String account = accountFolder;
+			p.execute(() -> beginClip(trigger, subject, account));
 		}
 	}
 
@@ -289,15 +557,154 @@ class ClipRecorder
 	// Capture pipeline
 	// ------------------------------------------------------------------
 
-	private void captureTick()
+	/**
+	 * Called once per rendered frame, ON THE RENDER THREAD. Deliberately trivial: claim the
+	 * single outstanding-capture slot and hand the work to another thread.
+	 *
+	 * <p>When a grab is still in flight the frame is skipped rather than queued, so a client
+	 * drawing faster than we can copy degrades to a lower capture rate instead of building a
+	 * backlog it can never clear.
+	 */
+	private void onClientFrame()
+	{
+		if (!canCapture.getAsBoolean() || !claimFrameRequest())
+		{
+			return;
+		}
+		final ThreadPoolExecutor g = grabber;
+		if (g == null || g.isShutdown())
+		{
+			framePending.set(false);
+			return;
+		}
+		g.execute(this::grabAndProcess);
+	}
+
+	/**
+	 * Whether Robot may be used for capture at all.
+	 *
+	 * <p>Turned off permanently for the session once screen capture is shown not to work, because
+	 * the failure is silent. Robot does not throw on Wayland or on macOS without Screen Recording
+	 * permission - it hands back a perfectly valid all-black image - so without this check the
+	 * plugin would cheerfully record black clips and report success.
+	 */
+	private volatile boolean screenGrabUsable = !isWayland();
+
+	/** When the current unbroken run of featureless grabs started, or 0 if there isn't one. */
+	private long blankSinceMs;
+
+	/** When to try Robot again after giving up on it, so a bad guess is not permanent. */
+	private volatile long retryScreenGrabAtMs;
+
+	/**
+	 * Wayland does not let an application screenshot the desktop through X11 APIs, and Robot has
+	 * no way to say so - it just returns black. Detected up front rather than by symptom.
+	 */
+	private static boolean isWayland()
+	{
+		final String session = System.getenv("XDG_SESSION_TYPE");
+		return (session != null && session.toLowerCase().contains("wayland"))
+			|| System.getenv("WAYLAND_DISPLAY") != null;
+	}
+
+	/**
+	 * Reject a capture that carries no picture, and give up on Robot if they keep coming.
+	 *
+	 * <p>Measured in seconds, not frames. This first counted 30 blank frames in a row, which
+	 * sounds like a lot and is not: capture follows the client, so at 100fps that is a third of a
+	 * second, and a black window while the client is still starting up cleared it easily. It
+	 * misfired on Windows, where screen capture works perfectly.
+	 *
+	 * <p>A broken setup returns black forever, so waiting several seconds costs those users
+	 * nothing, while no loading screen or fade lasts that long. Giving up is also temporary now -
+	 * Robot is retried later - so a wrong guess costs a stretch of slower capture rather than the
+	 * whole session.
+	 */
+	private java.awt.image.BufferedImage checkNotBlank(java.awt.image.BufferedImage shot)
+	{
+		if (shot == null)
+		{
+			return null;
+		}
+		if (!uniform(shot))
+		{
+			blankSinceMs = 0;
+			return shot;
+		}
+
+		final long now = System.currentTimeMillis();
+		if (blankSinceMs == 0)
+		{
+			blankSinceMs = now;
+		}
+		if (now - blankSinceMs < BLANK_MS_BEFORE_FALLBACK)
+		{
+			return shot;
+		}
+
+		log.warn("Screen capture has returned blank frames for {}s; falling back to the client's own "
+				+ "frames and retrying later. On Linux this usually means Wayland, on macOS a missing "
+				+ "Screen Recording permission.", (now - blankSinceMs) / 1000);
+		screenGrabUsable = false;
+		retryScreenGrabAtMs = now + SCREEN_GRAB_RETRY_MS;
+		blankSinceMs = 0;
+		return null;
+	}
+
+	/** True when every sampled pixel matches, which no real frame of the game manages. */
+	private static boolean uniform(java.awt.image.BufferedImage image)
+	{
+		final int w = image.getWidth();
+		final int h = image.getHeight();
+		if (w < 8 || h < 8)
+		{
+			return false;
+		}
+		final int first = image.getRGB(0, 0);
+		for (int y = 0; y < 8; y++)
+		{
+			for (int x = 0; x < 8; x++)
+			{
+				if (image.getRGB(x * (w - 1) / 7, y * (h - 1) / 7) != first)
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	/** Grab thread: copy the client's rectangle, off the render loop. */
+	private void grabAndProcess()
 	{
 		try
 		{
-			if (canCapture.getAsBoolean() && claimFrameRequest())
+			final java.awt.Image shot = grabScreen();
+			if (shot != null)
 			{
+				lastFrameWasScreen = true;
+				onFrameImage(shot);
+			}
+			else
+			{
+				// Not grabbable right now (minimised, not showing): ask the client for its own
+				// frame instead, so capture does not simply stop.
+				lastFrameWasScreen = false;
 				drawManager.requestNextFrameListener(this::onFrameImage);
 			}
-			// Finalise on time even if frames stop arriving (e.g. on logout).
+		}
+		catch (Exception e)
+		{
+			log.debug("capture failed", e);
+			framePending.set(false);
+		}
+	}
+
+	/** Finalises a clip whose post-roll has elapsed, even once the client stops drawing. */
+	private void postRollTick()
+	{
+		try
+		{
 			final ThreadPoolExecutor p = processor;
 			if (p != null && !p.isShutdown())
 			{
@@ -306,7 +713,102 @@ class ClipRecorder
 		}
 		catch (Exception e)
 		{
-			log.debug("capture tick failed", e);
+			log.debug("post-roll tick failed", e);
+		}
+	}
+
+	/**
+	 * Where the pointer sits inside {@code bounds}, as a 0-1 fraction, or null when it is
+	 * outside the captured area entirely - in which case no marker should be drawn at all.
+	 */
+	private static java.awt.geom.Point2D.Double mouseWithin(java.awt.Rectangle bounds)
+	{
+		try
+		{
+			final java.awt.PointerInfo info = java.awt.MouseInfo.getPointerInfo();
+			if (info == null)
+			{
+				return null;
+			}
+			final java.awt.Point at = info.getLocation();
+			final double fx = (at.x - bounds.x) / (double) bounds.width;
+			final double fy = (at.y - bounds.y) / (double) bounds.height;
+			if (fx < 0 || fx > 1 || fy < 0 || fy > 1)
+			{
+				return null;
+			}
+			return new java.awt.geom.Point2D.Double(fx, fy);
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+	}
+
+	/**
+	 * The rate a clip was actually captured at, measured from its own frame timestamps.
+	 *
+	 * <p>There is no configured rate to encode at any more, and frames are skipped whenever a
+	 * grab is still in flight, so the only honest answer comes from the frames themselves.
+	 * Getting this wrong makes clips play back too fast or too slow.
+	 */
+	private static int measuredRate(List<RecordedFrame> clip)
+	{
+		if (clip == null || clip.size() < 2)
+		{
+			return 30;
+		}
+		final long span = clip.get(clip.size() - 1).timestampMs - clip.get(0).timestampMs;
+		if (span <= 0)
+		{
+			return 30;
+		}
+		return Math.max(1, Math.min(240, (int) Math.round((clip.size() - 1) * 1000.0 / span)));
+	}
+
+	/**
+	 * Copy the client's on-screen rectangle straight from the desktop.
+	 *
+	 * <p>Runs on the capture thread, so the cost lands here rather than on the renderer. Null
+	 * when the window is not showing or the OS refuses the grab, in which case the tick is
+	 * simply skipped.
+	 */
+	private java.awt.Image grabScreen()
+	{
+		try
+		{
+			final java.awt.Rectangle bounds = canvasBounds.get();
+			if (bounds == null || bounds.width <= 0 || bounds.height <= 0)
+			{
+				return null;
+			}
+			if (!screenGrabUsable)
+			{
+				// Whatever made capture blank may be gone - the window was minimised, or a
+				// permission was granted - so try again occasionally rather than writing off
+				// the fast path for the rest of the session on one bad stretch.
+				if (System.currentTimeMillis() < retryScreenGrabAtMs)
+				{
+					return null;
+				}
+				screenGrabUsable = true;
+			}
+			if (robot == null)
+			{
+				robot = new java.awt.Robot();
+			}
+			// The exact rectangle is known here, so the real pointer position maps straight into
+			// it - no canvas coordinate space to translate and no stretched-mode correction, which
+			// is where the marker used to drift. Robot does not capture the cursor itself (the OS
+			// composites it separately), so it still has to be drawn.
+			screenMouse = mouseWithin(bounds);
+			final java.awt.image.BufferedImage shot = robot.createScreenCapture(bounds);
+			return checkNotBlank(shot);
+		}
+		catch (Exception | AWTError e)
+		{
+			log.debug("screen capture failed", e);
+			return null;
 		}
 	}
 
@@ -346,7 +848,8 @@ class ClipRecorder
 		final long now = System.currentTimeMillis();
 		// Read the mouse position on the render thread; the OS cursor is not part
 		// of the captured frame, so we draw our own marker at this point.
-		final java.awt.geom.Point2D.Double mouse = config.drawCursor() ? mousePosition.get() : null;
+		final java.awt.geom.Point2D.Double mouse = !config.drawCursor() ? null
+			: lastFrameWasScreen ? screenMouse : mousePosition.get();
 		w.execute(() -> processFrame(image, now, mouse));
 	}
 
@@ -356,7 +859,7 @@ class ClipRecorder
 		{
 			BufferedImage scaled = scale(image, mouse);
 			byte[] jpeg = toJpeg(scaled);
-			RecordedFrame frame = new RecordedFrame(now, jpeg);
+			RecordedFrame frame = new RecordedFrame(now, jpeg, scaled.getWidth(), scaled.getHeight());
 
 			// Buffer state stays single-threaded: workers only produce frames, the processor
 			// thread owns where they go.
@@ -379,6 +882,24 @@ class ClipRecorder
 		{
 			final long now = frame.timestampMs;
 
+			// The client was resized. Frames of two different shapes cannot go into one H.264
+			// clip, so the older ones are discarded and the buffer refills at the new size -
+			// the same trade the framerate change makes, and for the same reason.
+			if (!buffer.isEmpty() && (buffer.peekLast().width != frame.width
+				|| buffer.peekLast().height != frame.height))
+			{
+				buffer.clear();
+				bufferedBytes = 0;
+				capturing = false;
+				recording = false;
+				activeClip = null;
+				if (sessionFrames != null)
+				{
+					sessionFrames.clear();
+				}
+				log.debug("client resized to {}x{}, buffer reset", frame.width, frame.height);
+			}
+
 			// A manual take keeps everything and bypasses the rolling window entirely.
 			if (sessionFrames != null)
 			{
@@ -386,7 +907,7 @@ class ClipRecorder
 				sessionFrameCount = sessionFrames.size();
 				if (sessionFrames.size() >= maxSessionFrames())
 				{
-					finishSession("manual-limit");
+					finishSession(ClipTrigger.MANUAL, "", accountFolder);
 				}
 				return;
 			}
@@ -402,6 +923,7 @@ class ClipRecorder
 			{
 				insertOrdered(frame);
 			}
+			bufferedBytes += frame.jpeg.length;
 			evictOld(now);
 
 			if (capturing)
@@ -427,6 +949,26 @@ class ClipRecorder
 		}
 	}
 
+	/**
+	 * Nudge the buffer quality toward whatever keeps the full window in memory.
+	 *
+	 * <p>Small steps with a wide dead-band: the frames already buffered keep the quality they
+	 * were captured at, so reacting sharply would make a clip visibly change quality partway
+	 * through. Drifting gets there without a seam.
+	 */
+	private void adaptBufferQuality(long limit)
+	{
+		final float current = bufferQuality;
+		if (bufferedBytes > limit * 0.75 && current > MIN_BUFFER_QUALITY)
+		{
+			bufferQuality = Math.max(MIN_BUFFER_QUALITY, current - 0.05f);
+		}
+		else if (bufferedBytes < limit * 0.5 && current < 1.0f)
+		{
+			bufferQuality = Math.min(MAX_BUFFER_QUALITY, current + 0.02f);
+		}
+	}
+
 	/** Insert a late-arriving frame at its correct position. Processor thread only. */
 	private void insertOrdered(RecordedFrame frame)
 	{
@@ -447,7 +989,29 @@ class ClipRecorder
 		long preRollMs = preRollMs() + EVICT_SLACK_MS;
 		while (!buffer.isEmpty() && now - buffer.peekFirst().timestampMs > preRollMs)
 		{
-			buffer.removeFirst();
+			bufferedBytes -= buffer.removeFirst().jpeg.length;
+		}
+
+		// Second ceiling, on memory. At full client resolution and maximum buffer quality a
+		// few seconds of frames can run to hundreds of megabytes, which would take the client
+		// down. Dropping the oldest frames shortens the lead-up; running out of heap loses
+		// everything, so this is the better failure.
+		final long limit = Math.max(64, config.maxBufferMb()) * 1024L * 1024L;
+		adaptBufferQuality(limit);
+		boolean trimmed = false;
+		while (bufferedBytes > limit && buffer.size() > 1)
+		{
+			bufferedBytes -= buffer.removeFirst().jpeg.length;
+			trimmed = true;
+		}
+		if (trimmed && now - lastTrimWarnMs > 60_000)
+		{
+			lastTrimWarnMs = now;
+			// Say what was actually lost, not just that something was: the number that matters
+			// is how much lead-up a clip would now contain versus the length that was asked for.
+			final long heldMs = buffer.isEmpty() ? 0 : now - buffer.peekFirst().timestampMs;
+			log.debug("buffer at the {}MB limit: holding {}s of lead-up, {}s was requested",
+				config.maxBufferMb(), heldMs / 1000, Math.max(4, config.clipLength()));
 		}
 	}
 
@@ -455,7 +1019,7 @@ class ClipRecorder
 	// Clip lifecycle (processor thread)
 	// ------------------------------------------------------------------
 
-	private void beginClip(String reason)
+	private void beginClip(ClipTrigger trigger, String subject, String account)
 	{
 		long now = System.currentTimeMillis();
 		if (capturing || now - lastClipMs < COOLDOWN_MS)
@@ -463,7 +1027,13 @@ class ClipRecorder
 			return;
 		}
 		activeClip = new ArrayList<>(buffer);
-		activeReason = reason;
+		activeReason = trigger.folder();
+		// Name it now: the timestamp then reflects when the event happened rather than when
+		// the encoder happened to reach it, and the panel has something to show and rename
+		// while the clip is still being produced.
+		activePending = new PendingClip(pendingIds.incrementAndGet(), trigger.folder(),
+			clipName(subject), trigger, account);
+		pending.add(activePending);
 		capturing = true;
 		recording = true;
 		postRollEndMs = now + postRollMs();
@@ -481,16 +1051,20 @@ class ClipRecorder
 		}
 		// Drop any rolling-buffer state: a manual take starts from the arm press.
 		buffer.clear();
+		bufferedBytes = 0;
 		capturing = false;
 		recording = false;
 		activeClip = null;
 		sessionFrames = new ArrayList<>();
 		sessionFrameCount = 0;
+		sessionStartedMs = System.currentTimeMillis();
 		sessionActive = true;
 	}
 
-	private void finishSession(String reason)
+	private void finishSession(ClipTrigger trigger, String subject, String account)
 	{
+		final PendingClip entry = new PendingClip(pendingIds.incrementAndGet(), trigger.folder(),
+			clipName(subject), trigger, account);
 		final List<RecordedFrame> clip = sessionFrames;
 		sessionFrames = null;
 		sessionActive = false;
@@ -501,12 +1075,13 @@ class ClipRecorder
 		}
 		lastClipMs = System.currentTimeMillis();
 
-		final int fps = config.framerate();
+		final int fps = measuredRate(clip);
 		final ThreadPoolExecutor e = encoder;
 		if (e != null && !e.isShutdown() && !clip.isEmpty())
 		{
+			pending.add(entry);
 			pendingEncodes.incrementAndGet();
-			e.execute(() -> encodeAndSave(clip, reason, fps));
+			e.execute(() -> encodeAndSave(clip, entry, fps));
 		}
 		else if (clip.isEmpty())
 		{
@@ -517,7 +1092,9 @@ class ClipRecorder
 	/** Frame ceiling for a manual take, from the configured length limit and framerate. */
 	private int maxSessionFrames()
 	{
-		return Math.max(1, config.maxManualLength()) * Math.max(1, config.framerate());
+		// No configured rate any more; maxBufferMb is the real bound, so assume a high
+		// rate here and let the memory ceiling do the limiting.
+		return Math.max(1, config.maxManualLength()) * 120;
 	}
 
 	private void finishClip()
@@ -531,46 +1108,77 @@ class ClipRecorder
 		lastClipMs = System.currentTimeMillis();
 
 		final List<RecordedFrame> clip = activeClip;
-		final String reason = activeReason;
-		final int fps = config.framerate();
+		final PendingClip entry = activePending;
+		final int fps = measuredRate(clip);
 		activeClip = null;
 		activeReason = null;
+		activePending = null;
 
 		final ThreadPoolExecutor e = encoder;
-		if (e != null && !e.isShutdown() && clip != null && !clip.isEmpty())
+		if (e != null && !e.isShutdown() && clip != null && !clip.isEmpty() && entry != null)
 		{
 			pendingEncodes.incrementAndGet();
-			e.execute(() -> encodeAndSave(clip, reason, fps));
+			e.execute(() -> encodeAndSave(clip, entry, fps));
+		}
+		else if (entry != null)
+		{
+			pending.remove(entry);
 		}
 	}
 
-	private void encodeAndSave(List<RecordedFrame> frames, String reason, int fps)
+	private void encodeAndSave(List<RecordedFrame> frames, PendingClip entry, int fps)
 	{
 		File saved = null;
 		String error = null;
-		boolean fast = false;
 
 		try
 		{
-			File dir = outputDir();
-			//noinspection ResultOfMethodCallIgnored
-			dir.mkdirs();
-			fast = config.fastSave();
-			String name = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new Date())
-				+ "_" + sanitise(reason) + ".mp4";
-			File out = new File(dir, name);
+			if (entry.cancelled)
+			{
+				return;
+			}
+			// Filed by account and category, the way RuneLite files screenshots. clipDir creates
+			// the folders; a clip triggered before the character is known falls back to the root.
+			File dir = ClipStorage.clipDir(config, entry.account, entry.trigger);
+			// Read the name at the last moment: the user may have renamed it while it queued.
+			// uniqueFile, not new File: the encoder truncates whatever path it is given, so a
+			// name that collides with an existing clip would otherwise destroy it silently.
+			File out = ClipStorage.uniqueFile(dir, entry.name, ".mp4");
+			entry.encoding = true;
+			// Tell the panel, or its card sits on "capturing..." for the whole encode - which for a
+			// long clip is most of the minute the user spends watching it.
+			onPendingChanged.run();
 
-			if (fast)
+			// Encode beside the destination, then move into place.
+			//
+			// The muxer writes as it goes, so encoding straight to the .mp4 left a growing,
+			// unplayable file sitting in the clips folder for the whole minute-long encode - and
+			// the panel lists that folder, so the clip appeared twice: once as the pending card
+			// and again as a real clip whose size crept upward. A suffix the listing ignores keeps
+			// it invisible until it is finished, and also means a crash mid-encode cannot leave
+			// something behind that looks like a playable clip.
+			final File part = new File(dir, out.getName() + PART_SUFFIX);
+			ClipEncoder.encode(part, frames, fps, config.clipQuality().quantiser(),
+				() -> entry.cancelled);
+			if (entry.cancelled)
 			{
-				ClipEncoder.encodeMjpeg(out, frames, fps);
+				//noinspection ResultOfMethodCallIgnored
+				part.delete();
+				return;
 			}
-			else
+
+			try
 			{
-				ClipEncoder.encode(out, frames, fps);
+				java.nio.file.Files.move(part.toPath(), out.toPath(),
+					java.nio.file.StandardCopyOption.ATOMIC_MOVE);
 			}
-			// A frame from the middle of the clip is the most representative still, and we
-			// already hold it - no need to decode one back out of the finished video.
-			ClipLibrary.writeThumbnail(config, out, frames.get(frames.size() / 2).jpeg);
+			catch (java.io.IOException | UnsupportedOperationException moveFailed)
+			{
+				// Same directory, so this should not happen; fall back rather than lose the clip.
+				log.debug("atomic move failed for {}, retrying plain", out.getName(), moveFailed);
+				java.nio.file.Files.move(part.toPath(), out.toPath(),
+					java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			}
 			saved = out;
 		}
 		catch (IOException | RuntimeException ex)
@@ -580,9 +1188,10 @@ class ClipRecorder
 		}
 		finally
 		{
-			// Drop the count BEFORE notifying. The listeners redraw the side panel, which only
-			// repaints when told to - firing them while this still read 1 left the panel stuck
-			// on "Saving clip..." forever, with nothing to correct it.
+			// Drop the count and the pending entry BEFORE notifying. The listeners redraw the
+			// side panel, which only repaints when told to - firing them while this still read
+			// 1 left the panel stuck on "Saving clip..." forever, with nothing to correct it.
+			pending.remove(entry);
 			pendingEncodes.decrementAndGet();
 		}
 
@@ -593,36 +1202,10 @@ class ClipRecorder
 		}
 		onSaved.accept(saved);
 
-		if (!config.uploadClips())
+		if (config.uploadClips())
 		{
-			return;
-		}
-
-		// Motion JPEG is enormous - every frame is a keyframe - and Cloudflare rejects request
-		// bodies over 100MB regardless of our own cap, so a fast-saved clip is often physically
-		// unuploadable. Encode a compact H.264 copy just for the upload: the local file stays
-		// instant, and the upload stays within the limit.
-		if (fast)
-		{
-			File temp = null;
-			try
-			{
-				temp = File.createTempFile("instant-replay-", ".mp4");
-				ClipEncoder.encode(temp, frames, fps);
-				onUploadReady.accept(temp, Boolean.TRUE);
-			}
-			catch (IOException | RuntimeException ex)
-			{
-				log.debug("upload copy failed", ex);
-				if (temp != null)
-				{
-					//noinspection ResultOfMethodCallIgnored
-					temp.delete();
-				}
-			}
-		}
-		else
-		{
+			// Clips are H.264 throughout now, so the upload sends the file we just wrote -
+			// no separate encode, and nothing temporary to clean up.
 			onUploadReady.accept(saved, Boolean.FALSE);
 		}
 	}
@@ -659,16 +1242,12 @@ class ClipRecorder
 			throw new IllegalStateException("frame not ready");
 		}
 
-		int targetH = config.resolution().getHeight();
-		if (targetH <= 0 || targetH >= sh)
-		{
-			targetH = sh; // never upscale
-		}
-		int targetW = Math.round((float) sw * targetH / sh);
-
-		// H.264 requires even dimensions.
-		targetW = Math.max(2, targetW - (targetW % 2));
-		targetH = Math.max(2, targetH - (targetH % 2));
+		// Capture at the client's own size. Downscaling only ever lost detail: the encoder is
+		// the quality bottleneck, not the resolution, and a fixed target made a large client
+		// blurry for no saving worth having.
+		// H.264 requires even dimensions, so trim at most one pixel per axis.
+		final int targetW = Math.max(2, sw - (sw % 2));
+		final int targetH = Math.max(2, sh - (sh % 2));
 
 		BufferedImage dst = scratch.get();
 		if (dst == null || dst.getWidth() != targetW || dst.getHeight() != targetH)
@@ -716,7 +1295,8 @@ class ClipRecorder
 		}
 		ImageWriteParam param = writer.getDefaultWriteParam();
 		param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-		param.setCompressionQuality(Math.max(10, Math.min(100, config.quality())) / 100f);
+		// Maximum while there is memory headroom, easing back under pressure - see bufferQuality.
+		param.setCompressionQuality(bufferQuality);
 
 		ByteArrayOutputStream baos = new ByteArrayOutputStream();
 		try (ImageOutputStream ios = ImageIO.createImageOutputStream(baos))
@@ -731,14 +1311,6 @@ class ClipRecorder
 		return baos.toByteArray();
 	}
 
-	private static String sanitise(String reason)
-	{
-		if (reason == null)
-		{
-			return "clip";
-		}
-		return reason.toLowerCase().replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
-	}
 
 	private static ThreadPoolExecutor singleThread(String name)
 	{

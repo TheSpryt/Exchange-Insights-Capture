@@ -44,7 +44,11 @@ tasks.register('run', JavaExec) {
 	mainClass = pluginMainClass
 
 	jvmArgs "-ea"
-	args "--developer-mode", "--debug"
+	// --debug only. Developer mode additionally switches on the Dev Tools panel and, more
+	// annoyingly, the debug overlays that third-party plugins hide behind it - Weapon Animation
+	// Replacer paints a wall of player kit and colour ids over the game with it on. Nothing here
+	// needs developer mode; add it back temporarily if the widget inspector is ever wanted.
+	args "--debug"
 }
 
 tasks.register('shadowJar', Jar) {

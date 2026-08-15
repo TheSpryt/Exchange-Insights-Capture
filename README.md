@@ -26,8 +26,9 @@ save a clip on demand.
   the lead-up (default 2s).
 - **Framerate** — frames per second to capture (default 15). **This is the main
   performance dial** — see [Performance](#performance) below.
-- **Resolution** — vertical resolution; the client is downscaled to this height
-  and never upscaled (default 720p).
+- Clips are recorded at the client's own resolution. Resizing the client
+  discards the buffered frames and refills at the new size, because one clip
+  cannot mix two frame shapes.
 - **JPEG buffer quality** — trade memory use against clip quality.
 - **Draw cursor** — overlay a marker at the mouse position (the OS cursor is
   not part of captured frames, so it is drawn by the plugin).
@@ -71,8 +72,10 @@ regardless of how fast your machine is.
 
 Secondary levers, in rough order of effect:
 
-- **Resolution** — downscaling to 720p or 480p cuts the per-frame scale and JPEG
-  cost (it does not reduce the readback itself).
+- **Capture source** — "Screen region" copies the client's area of the desktop
+  off the render thread, so the game is never blocked waiting for the frame.
+  Much cheaper than "Game frame", at the cost of capturing anything overlapping
+  the window.
 - **Clip length** — sets how many frames are held in memory at once.
 - **JPEG buffer quality** — trades clip quality for memory and CPU.
 

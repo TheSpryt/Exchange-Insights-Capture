@@ -15,7 +15,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 
 	@ConfigSection(
 		name = "Recording",
-		description = "Clip length, framerate and quality settings",
+		description = "Clip length and quality",
 		position = 0
 	)
 	String recordingSection = "recording";
@@ -48,7 +48,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "captureMode",
 		name = "Capture mode",
-		description = "Off: nothing is captured. Automatic: always buffers the last few seconds so triggers can save the lead-up. Manual: idle until you press the arm hotkey, then records the whole take until you press it again. Manual costs nothing while disarmed.",
+		description = "Off, Automatic (always buffering), or Manual (hotkey to arm).",
 		section = recordingSection,
 		position = 0
 	)
@@ -61,7 +61,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "clipLength",
 		name = "Clip length",
-		description = "Total length of a saved clip, including the seconds before and after the event.",
+		description = "Total length of a saved clip.",
 		section = recordingSection,
 		position = 0
 	)
@@ -75,71 +75,45 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "postRoll",
 		name = "Post-event padding",
-		description = "How many seconds to keep recording after the event fires. The rest of the clip is the lead-up to the event.",
+		description = "Seconds to keep recording after the event.",
 		section = recordingSection,
 		position = 1
 	)
 	@Units(Units.SECONDS)
 	default int postRoll()
 	{
-		return 2;
-	}
-
-	@Range(min = 5, max = 60)
-	@ConfigItem(
-		keyName = "framerate",
-		name = "Framerate",
-		description = "Frames per second to capture. THIS IS THE MAIN PERFORMANCE SETTING: each captured frame forces the client to hand back a rendered frame, which on the GPU and 117HD renderers means a GPU readback that stalls rendering. If your in-game FPS drops, lower this first. 15 is smooth enough for clips; above 30 is expensive.",
-		section = recordingSection,
-		position = 2
-	)
-	@Units("fps")
-	default int framerate()
-	{
-		return 15;
+		return 5;
 	}
 
 	@ConfigItem(
-		keyName = "resolution",
-		name = "Resolution",
-		description = "Vertical resolution of saved clips. The client is downscaled to this height and never upscaled.",
-		section = recordingSection,
-		position = 3
-	)
-	default ResolutionMode resolution()
-	{
-		return ResolutionMode.P720;
-	}
-
-	@Range(min = 10, max = 100)
-	@ConfigItem(
-		keyName = "quality",
-		name = "JPEG buffer quality",
-		description = "Quality of the in-memory frame buffer (10-100). Lower values reduce memory use at the cost of clip quality.",
+		keyName = "clipQuality",
+		name = "Quality",
+		description = "Higher looks better and takes noticeably more disk.",
 		section = recordingSection,
 		position = 4
 	)
-	default int quality()
+	default ClipQuality clipQuality()
 	{
-		return 85;
+		return ClipQuality.MEDIUM;
 	}
 
+	@Range(min = 64, max = 2048)
 	@ConfigItem(
-		keyName = "fastSave",
-		name = "Fast save (Motion JPEG)",
-		description = "Write clips without re-compressing them. Saving finishes almost instantly instead of taking tens of seconds, at the cost of roughly 2-3x larger files and narrower playback support (VLC and most desktop players are fine; browsers often are not). Leave off for small, widely-playable H.264 clips.",
+		keyName = "maxBufferMb",
+		name = "Memory limit (MB)",
+		description = "Memory ceiling for buffered frames. Past it, the oldest are dropped.",
 		section = recordingSection,
-		position = 5
+		position = 6
 	)
-	default boolean fastSave()
+	default int maxBufferMb()
 	{
-		return false;
+		return 512;
 	}
 
 	@ConfigItem(
 		keyName = "drawCursor",
 		name = "Draw cursor",
-		description = "Draw a marker at the mouse position in saved clips. The operating system cursor is not part of captured frames, so this is rendered by the plugin.",
+		description = "Draw a marker at the mouse position in saved clips.",
 		section = recordingSection,
 		position = 5
 	)
@@ -155,7 +129,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "manualToggleHotkey",
 		name = "Manual arm / disarm hotkey",
-		description = "Manual mode only. Press once to arm and start recording; press again to stop and save the whole take. Click the box, then press the key you want to bind.",
+		description = "Manual mode: press to arm, press again to save.",
 		section = triggersSection,
 		position = 0
 	)
@@ -168,7 +142,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "maxManualLength",
 		name = "Manual recording limit",
-		description = "Safety cap for Manual mode: a take is stopped and saved automatically once it reaches this length, so a forgotten recording cannot fill memory. Roughly 70MB per minute at 15fps/720p.",
+		description = "Manual takes stop and save automatically at this length.",
 		section = triggersSection,
 		position = 1
 	)
@@ -181,7 +155,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "manualHotkey",
 		name = "Instant save hotkey",
-		description = "Automatic mode only. Press to instantly save a clip of the last few seconds, like a ShadowPlay manual capture. Unset by default: click the box, then press the key you want. If it still reads 'Not set' afterwards nothing was bound and the hotkey will do nothing.",
+		description = "Automatic mode: press to save the last few seconds.",
 		section = triggersSection,
 		position = 2
 	)
@@ -191,23 +165,47 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "onDeath",
-		name = "On death",
-		description = "Save a clip when your character dies.",
+		keyName = "onBossKill",
+		name = "Boss kills",
+		description = "A boss or raid kill count message.",
 		section = triggersSection,
 		position = 10
 	)
-	default boolean onDeath()
+	default boolean onBossKill()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onChestLoot",
+		name = "Chest loot",
+		description = "Looting a raid or reward chest.",
+		section = triggersSection,
+		position = 11
+	)
+	default boolean onChestLoot()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onClueScroll",
+		name = "Clue scroll rewards",
+		description = "Opening a clue scroll casket.",
+		section = triggersSection,
+		position = 12
+	)
+	default boolean onClueScroll()
 	{
 		return true;
 	}
 
 	@ConfigItem(
 		keyName = "onCollectionLog",
-		name = "On collection log unlock",
-		description = "Save a clip when a new item is added to your collection log. Requires the in-game collection log notification to be enabled.",
+		name = "Collection log",
+		description = "New collection log item. Needs the in-game notification on.",
 		section = triggersSection,
-		position = 11
+		position = 13
 	)
 	default boolean onCollectionLog()
 	{
@@ -215,48 +213,119 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "onLevelUp",
-		name = "On level up",
-		description = "Save a clip when you reach a new level in any skill.",
-		section = triggersSection,
-		position = 12
-	)
-	default boolean onLevelUp()
-	{
-		return false;
-	}
-
-	@ConfigItem(
-		keyName = "onValuableDrop",
-		name = "On valuable drop",
-		description = "Save a clip when you receive loot worth more than the value threshold below.",
-		section = triggersSection,
-		position = 13
-	)
-	default boolean onValuableDrop()
-	{
-		return false;
-	}
-
-	@Range(min = 1)
-	@ConfigItem(
-		keyName = "valuableDropThreshold",
-		name = "Valuable drop value",
-		description = "Minimum total Grand Exchange value of a drop (in gp) needed to save a clip.",
+		keyName = "onCombatAchievement",
+		name = "Combat achievements",
+		description = "Combat achievement task completed.",
 		section = triggersSection,
 		position = 14
 	)
-	default int valuableDropThreshold()
+	default boolean onCombatAchievement()
 	{
-		return 1_000_000;
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onDeath",
+		name = "Deaths",
+		description = "Your character dies.",
+		section = triggersSection,
+		position = 15
+	)
+	default boolean onDeath()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onFriendDeath",
+		name = "Friend deaths",
+		description = "A friend or friends chat member dies nearby. Off by default - in a raid or a busy area this fires constantly, and it is other people's deaths rather than yours.",
+		section = triggersSection,
+		position = 16
+	)
+	default boolean onFriendDeath()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "onClanDeath",
+		name = "Clan deaths",
+		description = "A clan member dies nearby. Off by default for the same reason as friend deaths - your own team dying is a normal part of a raid.",
+		section = triggersSection,
+		position = 17
+	)
+	default boolean onClanDeath()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "onDuel",
+		name = "Duels",
+		description = "A duel ends.",
+		section = triggersSection,
+		position = 18
+	)
+	default boolean onDuel()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onFriendsChatKick",
+		name = "Friends chat kicks",
+		description = "You kick someone from your friends chat.",
+		section = triggersSection,
+		position = 19
+	)
+	default boolean onFriendsChatKick()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onKingdom",
+		name = "Kingdom rewards",
+		description = "Collecting your Miscellania reward.",
+		section = triggersSection,
+		position = 20
+	)
+	default boolean onKingdom()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onLeagueTask",
+		name = "League tasks",
+		description = "A league task is completed.",
+		section = triggersSection,
+		position = 21
+	)
+	default boolean onLeagueTask()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onLevelUp",
+		name = "Levels",
+		description = "Level up in any skill.",
+		section = triggersSection,
+		position = 22
+	)
+	default boolean onLevelUp()
+	{
+		return true;
 	}
 
 	@ConfigItem(
 		keyName = "onPet",
-		name = "On pet drop",
-		description = "Save a clip when you receive a pet.",
+		name = "Pets",
+		description = "You receive a pet.",
 		section = triggersSection,
-		position = 15
+		position = 23
 	)
 	default boolean onPet()
 	{
@@ -264,37 +333,82 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "onQuestComplete",
-		name = "On quest completion",
-		description = "Save a clip when you complete a quest.",
+		keyName = "onPvpKill",
+		name = "PvP kills",
+		description = "You defeat another player.",
 		section = triggersSection,
-		position = 16
+		position = 24
 	)
-	default boolean onQuestComplete()
+	default boolean onPvpKill()
 	{
-		return false;
+		return true;
 	}
 
 	@ConfigItem(
-		keyName = "onCombatAchievement",
-		name = "On combat task",
-		description = "Save a clip when you complete a combat achievement task.",
+		keyName = "onQuestComplete",
+		name = "Quests",
+		description = "You complete a quest.",
 		section = triggersSection,
-		position = 17
+		position = 25
 	)
-	default boolean onCombatAchievement()
+	default boolean onQuestComplete()
 	{
-		return false;
+		return true;
 	}
 
-	// ------------------------------------------------------------------
-	// Output
-	// ------------------------------------------------------------------
+	@ConfigItem(
+		keyName = "onUntradeableDrop",
+		name = "Untradeable drops",
+		description = "An untradeable item drops.",
+		section = triggersSection,
+		position = 26
+	)
+	default boolean onUntradeableDrop()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onValuableDrop",
+		name = "Valuable drops",
+		description = "Loot worth more than the threshold below.",
+		section = triggersSection,
+		position = 27
+	)
+	default boolean onValuableDrop()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "onWildernessLootChest",
+		name = "Wilderness loot chest",
+		description = "Opening the wilderness loot chest.",
+		section = triggersSection,
+		position = 28
+	)
+	default boolean onWildernessLootChest()
+	{
+		return true;
+	}
+
+	@Range(min = 0)
+	@ConfigItem(
+		keyName = "valuableDropThreshold",
+		name = "Valuable threshold",
+		description = "Minimum drop value (gp) needed to save a clip.",
+		section = triggersSection,
+		position = 60
+	)
+	default int valuableDropThreshold()
+	{
+		return 100000;
+	}
 
 	@ConfigItem(
 		keyName = "outputDirectory",
 		name = "Save folder",
-		description = "Folder to save clips to. Leave blank to use the default RuneLite 'captures' folder, alongside 'screenshots'.",
+		description = "Where clips are saved. Clear to restore the default folder.",
 		section = outputSection,
 		position = 0
 	)
@@ -306,7 +420,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "notify",
 		name = "Chat message on save",
-		description = "Print a game chat message when a clip has finished saving.",
+		description = "Chat message when a clip finishes saving.",
 		section = outputSection,
 		position = 1
 	)
@@ -318,7 +432,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "limitLocalStorage",
 		name = "Limit storage size",
-		description = "Cap how much disk the clip folder is allowed to use. Without this, clips accumulate until you clear them out yourself.",
+		description = "Limit how much disk the clip folder may use.",
 		section = outputSection,
 		position = 3
 	)
@@ -331,7 +445,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "localStorageLimitGb",
 		name = "Size limit (GB)",
-		description = "Maximum total size of the clip folder. Only files this plugin writes are counted or removed.",
+		description = "Maximum size of the clip folder.",
 		section = outputSection,
 		position = 4
 	)
@@ -343,7 +457,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "storageLimitMode",
 		name = "Storage limit mode",
-		description = "Auto delete: remove the oldest clips to make room for new ones. Warn only: keep everything and warn in chat when over the limit.",
+		description = "Over the limit: delete the oldest clips, or just warn in chat.",
 		section = outputSection,
 		position = 5
 	)
@@ -355,7 +469,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "showStatusOverlay",
 		name = "Show status overlay",
-		description = "Show a small on-screen indicator when Exchange Insights Capture is armed, recording a clip, or has just saved one.",
+		description = "Show a small on-screen recording indicator.",
 		section = outputSection,
 		position = 2
 	)
@@ -371,7 +485,7 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "eiAccountToken",
 		name = "Account token",
-		description = "Your Exchange Insights account token, used to upload clips. Get it free at exchange-insights.gg (Account -> RuneLite plugin). If you leave this empty and either the Exchange Insights or Bank Templates plugin has a token configured, that one is used automatically. Treat it like a password.",
+		description = "Set automatically when you link. May stay empty if another plugin holds the token.",
 		section = accountSection,
 		position = 0,
 		secret = true
@@ -384,7 +498,8 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "uploadClips",
 		name = "Upload clips",
-		description = "Upload each saved clip to your Exchange Insights account. Requires a linked account token. Clips are always written to disk first, so a failed upload never loses a recording.",
+		description = "Upload saved clips to your account. Needs a linked account.",
+		warning = "This feature sends your clips and IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		section = accountSection,
 		position = 1
 	)

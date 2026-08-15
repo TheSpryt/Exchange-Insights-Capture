@@ -2,38 +2,78 @@ package com.exchangeinsightscapture;
 
 import java.awt.Image;
 import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import javax.imageio.ImageIO;
+import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
+import org.jcodec.api.awt.AWTFrameGrab;
+import org.jcodec.containers.mp4.demuxer.MP4Demuxer;
+import org.jcodec.common.io.SeekableByteChannel;
+import org.jcodec.common.io.NIOUtils;
+import org.jcodec.common.DemuxerTrack;
 
 /**
- * The saved-clip library: what is on disk, plus the thumbnails shown beside each entry.
+ * The saved-clip library: what is on disk, and a preview frame for each entry.
  *
- * <p>Thumbnails are written <em>at save time</em> from a frame we already hold in memory,
- * rather than decoded back out of the finished video later. Decoding a frame from an MP4
- * would mean a full H.264 decode per thumbnail (and would not work at all for the Motion
- * JPEG clips), so a small sidecar JPEG is both faster and format-independent.
+ * <p>Previews are decoded straight out of the video rather than kept as sidecar files. That
+ * costs a frame decode the first time a clip is shown, but it means there is no second set of
+ * files to write, rename, delete or leave behind - the clip is the only artefact.
  *
- * <p>Sidecars live in a dot-directory beside the clips so they never appear in the folder
- * the user browses, and are never counted or pruned as clips.
+ * <p>Decoding is not free, so results are cached in memory, keyed by path AND modification
+ * time so a renamed or overwritten clip can never show a stale image. The cache is bounded:
+ * a decoded frame is a full-size raster, not a thumbnail.
  */
 @Slf4j
 final class ClipLibrary
 {
-	private static final String THUMB_DIR = ".thumbs";
-	/** Sized to fill a card in the side panel, which is a little under 200px of usable width. */
-	static final int THUMB_WIDTH = 190;
+	/**
+	 * Width of the preview stored with a clip.
+	 *
+	 * <p>190 was sized for this plugin's own panel and nothing else. The same image is shown on the
+	 * website, and a soft thumbnail is the most visible thing about a clip nobody has played yet.
+	 * 1280 is what video sites use for the same job: sharp on a high-density display, and still a
+	 * couple of hundred kilobytes against a clip of a hundred megabytes.
+	 */
+	static final int THUMB_WIDTH = 1280;
+
+	/**
+	 * Width the in-memory preview cache holds, which is NOT the thumbnail width.
+	 *
+	 * <p>The two were the same until the thumbnail grew. Caching at 1280 would put 3.6MB per entry
+	 * back into the heap - forty of those is what this cache was just fixed for - and the panel
+	 * draws them roughly two hundred pixels wide, so it would be paying for detail it discards
+	 * immediately. The uploaded thumbnail decodes its own frame instead.
+	 */
+	private static final int PREVIEW_CACHE_WIDTH = 480;
+
+	/**
+	 * JPEG quality for that preview. ImageIO defaults to about 0.75, which shows on a still frame
+	 * of a dark scene. A preview is tens of kilobytes against a clip of tens of megabytes, so the
+	 * extra bytes are not worth economising on.
+	 */
+	private static final float THUMB_QUALITY = 0.9f;
+
+	private static final int CACHE_SIZE = 40;
+
+	private static final Map<String, Image> CACHE = Collections.synchronizedMap(
+		new LinkedHashMap<String, Image>(16, 0.75f, true)
+		{
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<String, Image> eldest)
+			{
+				return size() > CACHE_SIZE;
+			}
+		});
 
 	private ClipLibrary()
 	{
 	}
 
-	/** One clip on disk, with its thumbnail if we have one. */
+	/** One clip on disk. */
 	static final class Entry
 	{
 		final File file;
@@ -55,96 +95,258 @@ final class ClipLibrary
 			final int dot = name.lastIndexOf('.');
 			return dot > 0 ? name.substring(0, dot) : name;
 		}
+
+		String cacheKey()
+		{
+			return file.getAbsolutePath() + "@" + modifiedAt;
+		}
 	}
 
-	private static File thumbDir(ExchangeInsightsCaptureConfig config)
-	{
-		return new File(ClipStorage.outputDir(config), THUMB_DIR);
-	}
-
-	private static File thumbFor(ExchangeInsightsCaptureConfig config, String clipFileName)
-	{
-		final int dot = clipFileName.lastIndexOf('.');
-		final String base = dot > 0 ? clipFileName.substring(0, dot) : clipFileName;
-		return new File(thumbDir(config), base + ".jpg");
-	}
-
-	/** Saved clips, newest first. */
+	/**
+	 * Saved clips, newest first, from anywhere under the save folder.
+	 *
+	 * <p>Clips are filed by account and category, so this walks rather than lists. The panel shows
+	 * one flat list regardless: the folders exist for the player browsing them in a file manager,
+	 * not as a hierarchy to navigate in a side panel two hundred pixels wide.
+	 */
 	static List<Entry> list(ExchangeInsightsCaptureConfig config)
 	{
-		final File dir = ClipStorage.outputDir(config);
-		final File[] found = dir.listFiles(f -> f.isFile() && f.getName().toLowerCase().endsWith(".mp4"));
 		final List<Entry> out = new ArrayList<>();
-		if (found != null)
-		{
-			for (File f : found)
-			{
-				out.add(new Entry(f));
-			}
-		}
+		collect(ClipStorage.outputDir(config), out, 0);
 		out.sort(Comparator.comparingLong((Entry e) -> e.modifiedAt).reversed());
 		return out;
 	}
 
-	/**
-	 * Write the thumbnail sidecar for a clip from one of its own buffered frames.
-	 * Best-effort: a missing thumbnail costs a placeholder in the panel, nothing more.
-	 */
-	static void writeThumbnail(ExchangeInsightsCaptureConfig config, File clip, byte[] jpegFrame)
+	private static void collect(File dir, List<Entry> into, int depth)
 	{
-		if (jpegFrame == null || jpegFrame.length == 0)
+		final File[] found = dir.listFiles();
+		if (found == null)
 		{
 			return;
 		}
-		try
+		for (File f : found)
 		{
-			final BufferedImage full = ImageIO.read(new ByteArrayInputStream(jpegFrame));
-			if (full == null || full.getWidth() <= 0)
+			if (f.isFile() && f.getName().toLowerCase().endsWith(".mp4"))
 			{
-				return;
+				into.add(new Entry(f));
 			}
-			final int w = THUMB_WIDTH;
-			final int h = Math.max(1, Math.round((float) full.getHeight() * w / full.getWidth()));
-
-			final BufferedImage thumb = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-			final java.awt.Graphics2D g = thumb.createGraphics();
-			g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
-				java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-			g.drawImage(full, 0, 0, w, h, null);
-			g.dispose();
-
-			final File dir = thumbDir(config);
-			//noinspection ResultOfMethodCallIgnored
-			dir.mkdirs();
-			ImageIO.write(thumb, "jpg", thumbFor(config, clip.getName()));
-		}
-		catch (IOException | RuntimeException e)
-		{
-			log.debug("thumbnail write failed for {}", clip.getName(), e);
+			else if (f.isDirectory() && depth < 2)
+			{
+				collect(f, into, depth + 1);
+			}
 		}
 	}
 
-	/** The clip's thumbnail, or null when there isn't one (clips saved before this existed). */
-	static Image thumbnail(ExchangeInsightsCaptureConfig config, Entry entry)
-	{
-		final File f = thumbFor(config, entry.name);
-		if (!f.isFile())
+	/**
+	 * Clip lengths in seconds, keyed the same way as previews.
+	 *
+	 * <p>Read from the container rather than derived from file size or a frame count: capture
+	 * rate varies with the client now, so nothing outside the file knows how long it runs.
+	 */
+	private static final Map<String, Double> DURATIONS = Collections.synchronizedMap(
+		new LinkedHashMap<String, Double>(16, 0.75f, true)
 		{
-			return null;
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<String, Double> eldest)
+			{
+				return size() > CACHE_SIZE;
+			}
+		});
+
+	/** Length in seconds, or null until it has been read. Never blocks. */
+	static Double cachedDuration(Entry entry)
+	{
+		return DURATIONS.get(entry.cacheKey());
+	}
+
+	/** Read a clip's length from its container. Opens the file; call off the EDT. */
+	static Double readDuration(Entry entry)
+	{
+		final Double known = DURATIONS.get(entry.cacheKey());
+		if (known != null)
+		{
+			return known;
+		}
+		SeekableByteChannel channel = null;
+		try
+		{
+			channel = NIOUtils.readableChannel(entry.file);
+			final MP4Demuxer demuxer = MP4Demuxer.createMP4Demuxer(channel);
+			for (DemuxerTrack track : demuxer.getTracks())
+			{
+				final org.jcodec.common.DemuxerTrackMeta meta = track.getMeta();
+				if (meta != null && meta.getTotalDuration() > 0)
+				{
+					final Double seconds = meta.getTotalDuration();
+					DURATIONS.put(entry.cacheKey(), seconds);
+					return seconds;
+				}
+			}
+		}
+		catch (Exception | AssertionError e)
+		{
+			log.debug("could not read the length of {}", entry.name, e);
+		}
+		finally
+		{
+			NIOUtils.closeQuietly(channel);
+		}
+		return null;
+	}
+
+	/** A already-decoded preview, or null if one has not been decoded yet. Never blocks. */
+	static Image cachedPreview(Entry entry)
+	{
+		return CACHE.get(entry.cacheKey());
+	}
+
+	/**
+	 * Decode this clip's first frame. Slow enough to matter (a full video frame decode), so it
+	 * must not be called on the EDT. Returns null when the frame cannot be read - Motion JPEG
+	 * clips in particular are not decodable by every path - and caches the result either way is
+	 * avoided so a transient failure can be retried.
+	 */
+	static Image decodePreview(Entry entry)
+	{
+		final Image cached = CACHE.get(entry.cacheKey());
+		if (cached != null)
+		{
+			return cached;
 		}
 		try
 		{
-			return ImageIO.read(f);
+			final BufferedImage frame = AWTFrameGrab.getFrame(entry.file, 0);
+			if (frame != null)
+			{
+				// Cached at panel size, not at capture size. A full frame is a live raster - about
+				// 3.8MB at 1310x720 and over 8MB at 1080p - so forty of them was a hundred and fifty
+				// megabytes of heap held for images drawn two hundred pixels wide.
+				final int w = Math.min(PREVIEW_CACHE_WIDTH, frame.getWidth());
+				final int h = Math.max(1, Math.round((float) frame.getHeight() * w / frame.getWidth()));
+				final BufferedImage preview = w == frame.getWidth()
+					? frame
+					: downscale(frame, frame.getWidth(), frame.getHeight(), w, h);
+				CACHE.put(entry.cacheKey(), preview);
+				return preview;
+			}
 		}
-		catch (IOException | RuntimeException e)
+		catch (Exception | AssertionError e)
 		{
+			// JCodec throws a variety of things (including AssertionError) on formats it cannot
+			// decode. A missing preview is cosmetic, so it must never propagate.
+			log.debug("could not decode a preview frame for {}", entry.name, e);
+		}
+		return null;
+	}
+
+	/**
+	 * This clip's preview as a JPEG, ready to upload.
+	 *
+	 * <p>Deliberately the SAME code path the panel displays from - decode frame 0, scale to
+	 * THUMB_WIDTH - so the image stored on the account is byte-for-byte what this client would
+	 * have drawn. There is no second implementation to drift: the server never generates a
+	 * thumbnail, it only keeps the one a client made.
+	 */
+	static byte[] previewJpeg(Entry entry)
+	{
+		try
+		{
+			// Decoded fresh rather than taken from the cache. The cache holds a panel-sized copy,
+			// and scaling that up to thumbnail size would produce something blurrier than the frame
+			// it came from. This runs once per clip, on upload, so a second decode is affordable.
+			final Image full = AWTFrameGrab.getFrame(entry.file, 0);
+			if (full == null)
+			{
+				return null;
+			}
+			final int srcW = full.getWidth(null);
+			final int srcH = full.getHeight(null);
+			if (srcW <= 0 || srcH <= 0)
+			{
+				return null;
+			}
+			// Never enlarge. A client running in a small window produces frames narrower than the
+			// target, and stretching one up spends bytes making it blurrier than the source.
+			final int w = Math.min(THUMB_WIDTH, srcW);
+			final int h = Math.max(1, Math.round((float) srcH * w / srcW));
+
+			final BufferedImage scaled = downscale(full, srcW, srcH, w, h);
+			return encodeJpeg(scaled);
+		}
+		catch (Exception | AssertionError e)
+		{
+			log.debug("could not build a preview jpeg for {}", entry.name, e);
 			return null;
 		}
 	}
 
 	/**
-	 * Rename a clip and its thumbnail together. The new name is sanitised and keeps the
-	 * original extension, so a rename can neither escape the folder nor change the format.
+	 * Shrink an image in halving steps rather than one jump.
+	 *
+	 * <p>A single large reduction samples too few source pixels and throws away detail that was
+	 * there - thin text and UI edges come out ragged, which is most of what a game frame contains.
+	 * Halving repeatedly averages the pixels in between, so each step has something to work with.
+	 */
+	private static BufferedImage downscale(Image full, int srcW, int srcH, int targetW, int targetH)
+	{
+		BufferedImage current = new BufferedImage(srcW, srcH, BufferedImage.TYPE_INT_RGB);
+		java.awt.Graphics2D g = current.createGraphics();
+		g.drawImage(full, 0, 0, null);
+		g.dispose();
+
+		int w = srcW;
+		int h = srcH;
+		while (w / 2 > targetW)
+		{
+			w /= 2;
+			h = Math.max(1, h / 2);
+			final BufferedImage step = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+			g = step.createGraphics();
+			g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+				java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+			g.drawImage(current, 0, 0, w, h, null);
+			g.dispose();
+			current = step;
+		}
+
+		final BufferedImage out = new BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_RGB);
+		g = out.createGraphics();
+		g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+			java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+		g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING,
+			java.awt.RenderingHints.VALUE_RENDER_QUALITY);
+		g.drawImage(current, 0, 0, targetW, targetH, null);
+		g.dispose();
+		return out;
+	}
+
+	/** Write a JPEG at a stated quality, rather than whatever ImageIO picks by default. */
+	private static byte[] encodeJpeg(BufferedImage image) throws java.io.IOException
+	{
+		final javax.imageio.ImageWriter writer =
+			javax.imageio.ImageIO.getImageWritersByFormatName("jpg").next();
+		final javax.imageio.ImageWriteParam param = writer.getDefaultWriteParam();
+		param.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+		param.setCompressionQuality(THUMB_QUALITY);
+
+		final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+		try (javax.imageio.stream.ImageOutputStream ios =
+			javax.imageio.ImageIO.createImageOutputStream(out))
+		{
+			writer.setOutput(ios);
+			writer.write(null, new javax.imageio.IIOImage(image, null, null), param);
+		}
+		finally
+		{
+			// Disposed on the thread that created it; an ImageWriter is not shared between threads.
+			writer.dispose();
+		}
+		return out.toByteArray();
+	}
+
+	/**
+	 * Rename a clip. The new name is sanitised and keeps the original extension, so a rename
+	 * can neither escape the folder nor change the format.
 	 *
 	 * @return the new file, or null if the rename could not be performed.
 	 */
@@ -166,39 +368,19 @@ final class ClipLibrary
 		{
 			return null;
 		}
-		if (!entry.file.renameTo(target))
-		{
-			return null;
-		}
-		// Move the sidecar too, so the thumbnail follows its clip.
-		final File oldThumb = thumbFor(config, entry.name);
-		if (oldThumb.isFile())
-		{
-			//noinspection ResultOfMethodCallIgnored
-			oldThumb.renameTo(thumbFor(config, target.getName()));
-		}
-		return target;
+		return entry.file.renameTo(target) ? target : null;
 	}
 
-	/** Delete a clip and its thumbnail. */
+	/** Delete a clip. */
 	static boolean delete(ExchangeInsightsCaptureConfig config, Entry entry)
 	{
-		final File thumb = thumbFor(config, entry.name);
-		if (thumb.isFile())
-		{
-			//noinspection ResultOfMethodCallIgnored
-			thumb.delete();
-		}
+		CACHE.remove(entry.cacheKey());
 		return entry.file.delete();
 	}
 
 	/** Strip anything that could escape the folder or upset the filesystem. */
 	private static String sanitise(String name)
 	{
-		if (name == null)
-		{
-			return "";
-		}
-		return name.replaceAll("[\\\\/:*?\"<>|]", "_").replaceAll("\\s+", " ").trim();
+		return ClipStorage.safeName(name);
 	}
 }

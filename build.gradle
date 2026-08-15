@@ -27,7 +27,6 @@ dependencies {
 	implementation 'org.jcodec:jcodec:0.2.5'
 	implementation 'org.jcodec:jcodec-javase:0.2.5'
 
-	testImplementation 'junit:junit:4.12'
 	testImplementation group: 'net.runelite', name:'client', version: runeLiteVersion
 	testImplementation group: 'net.runelite', name:'jshell', version: runeLiteVersion
 }

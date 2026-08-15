@@ -86,6 +86,19 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "captureFps",
+		name = "Framerate",
+		description = "Frames a second to capture. A ceiling: clips can never run faster than the "
+			+ "client draws, and a lower one costs less memory, disk and encoding time.",
+		section = recordingSection,
+		position = 2
+	)
+	default ClipFramerate captureFps()
+	{
+		return ClipFramerate.FPS_60;
+	}
+
+	@ConfigItem(
 		keyName = "clipQuality",
 		name = "Quality",
 		description = "Higher looks better and takes noticeably more disk.",

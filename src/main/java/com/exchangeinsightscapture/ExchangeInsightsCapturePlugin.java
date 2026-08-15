@@ -1181,12 +1181,13 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 			return;
 		}
 
-		// The framerate sets the capture scheduler's period. Re-arm rather than fully
-		// restarting: the buffer is intentionally discarded (it would otherwise mix two
-		// sample rates and play back at the wrong speed) but any in-flight encode survives.
-		if ("framerate".equals(event.getKey()) && recorder != null)
+		// Framerate applies from the next frame and the buffer is left alone. Clips carry a
+		// duration per frame rather than one rate for the whole file, so a clip spanning the
+		// change plays back correctly - and clearing the buffer would throw away the lead-up
+		// that is the entire point of it.
+		if ("captureFps".equals(event.getKey()) && recorder != null)
 		{
-			recorder.restartCapture();
+			recorder.refreshFramerate();
 		}
 		else if ("captureMode".equals(event.getKey()) && recorder != null
 			&& config.captureMode() != CaptureMode.MANUAL && recorder.isSessionActive())

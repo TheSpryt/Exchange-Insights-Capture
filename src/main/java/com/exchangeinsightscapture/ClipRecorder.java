@@ -144,11 +144,10 @@ class ClipRecorder
 	/**
 	 * Quality of the in-memory JPEG buffer, adjusted automatically.
 	 *
-	 * <p>There is deliberately no setting for this. It was removed because at a fixed capture
-	 * rate the memory cost was predictable, but capture now follows the client - so the same
-	 * buffer holds four times as much at 240fps as at 60. Left at maximum it fills the memory
-	 * ceiling and the oldest frames get dropped, which silently shortens the lead-up that is
-	 * the entire point of a replay buffer.
+	 * <p>There is deliberately no setting for this. Capture follows the client rather than a fixed
+	 * rate, so even under the framerate cap the same buffer holds four times as much at 120fps as
+	 * at 30. Left at maximum it fills the memory ceiling and the oldest frames get dropped, which
+	 * silently shortens the lead-up that is the entire point of a replay buffer.
 	 *
 	 * <p>Trading a little buffer quality for keeping the full window is the better bargain, and
 	 * it only happens under pressure: with headroom this sits at maximum. The loss is in an
@@ -317,6 +316,11 @@ class ClipRecorder
 		// Anything left wearing the in-progress suffix is from an encode that never finished -
 		// a crash or a kill - and will never be resumed, so it is dead weight on disk.
 		sweepPartials();
+
+		// Seeded rather than left at zero: nanoTime has no defined origin and is allowed to be
+		// negative, so a zero deadline could sit in the future and stall capture entirely.
+		refreshFramerate();
+		nextCaptureAtNanos = System.nanoTime();
 
 		// One capture per frame the client actually draws, rather than a timer guessing at the
 		// rate. The listener runs ON THE RENDER THREAD, so it does the least work possible -
@@ -513,30 +517,6 @@ class ClipRecorder
 		}
 	}
 
-	/**
-	 * Discard the rolling buffer and start collecting again.
-	 *
-	 * <p>Kept for the cases that genuinely invalidate what is buffered - a client resize, or
-	 * leaving a capture mode. Capture itself no longer needs re-arming, because it follows the
-	 * client's frames rather than a timer that had to be rebuilt at a new period.
-	 */
-	void restartCapture()
-	{
-		final ThreadPoolExecutor p = processor;
-		if (p != null && !p.isShutdown())
-		{
-			p.execute(() ->
-			{
-				buffer.clear();
-				bufferedBytes = 0;
-				capturing = false;
-				recording = false;
-				activeClip = null;
-			});
-		}
-		framePending.set(false);
-	}
-
 	/** Request a clip; safe to call from any thread (e.g. the client thread). */
 	/**
 	 * Request a clip.
@@ -568,7 +548,7 @@ class ClipRecorder
 	 */
 	private void onClientFrame()
 	{
-		if (!canCapture.getAsBoolean() || !claimFrameRequest())
+		if (!dueForCapture() || !canCapture.getAsBoolean() || !claimFrameRequest())
 		{
 			return;
 		}
@@ -579,6 +559,48 @@ class ClipRecorder
 			return;
 		}
 		g.execute(this::grabAndProcess);
+	}
+
+	/** The gap between captures, from {@link ClipFramerate}. Read on the render thread. */
+	private volatile long capturePeriodNanos = ClipFramerate.FPS_60.periodNanos();
+
+	/**
+	 * When the next capture is allowed.
+	 *
+	 * <p>Only ever touched on the render thread once capture is running, but seeded from whichever
+	 * thread starts the recorder, so it is volatile rather than relying on the registration of the
+	 * frame listener to publish it.
+	 */
+	private volatile long nextCaptureAtNanos;
+
+	/** Re-read the framerate setting. Takes effect on the next frame; the buffer is untouched. */
+	void refreshFramerate()
+	{
+		capturePeriodNanos = config.captureFps().periodNanos();
+	}
+
+	/**
+	 * Whether enough time has passed to take another frame.
+	 *
+	 * <p>The next slot is advanced by exactly one period rather than being set to now, so the
+	 * average rate holds even though the client's frames never land on it. Resetting to now
+	 * instead would round every gap up to the next whole client frame - asking for 60 from a
+	 * client drawing every 10ms would yield 50, because 16.67ms always lands mid-frame.
+	 *
+	 * <p>Falling more than a period behind means the client stopped drawing - a loading screen, a
+	 * minimised window - so the schedule restarts from now. Catching up would otherwise fire a
+	 * burst of captures for time when nothing was on screen.
+	 */
+	private boolean dueForCapture()
+	{
+		final long now = System.nanoTime();
+		if (now - nextCaptureAtNanos < 0)
+		{
+			return false;
+		}
+		final long period = capturePeriodNanos;
+		nextCaptureAtNanos = now - nextCaptureAtNanos > period ? now + period : nextCaptureAtNanos + period;
+		return true;
 	}
 
 	/**
@@ -1093,9 +1115,9 @@ class ClipRecorder
 	/** Frame ceiling for a manual take, from the configured length limit and framerate. */
 	private int maxSessionFrames()
 	{
-		// No configured rate any more; maxBufferMb is the real bound, so assume a high
-		// rate here and let the memory ceiling do the limiting.
-		return Math.max(1, config.maxManualLength()) * 120;
+		// Exact now that capture is capped: the rate cannot exceed the setting, so this is a real
+		// ceiling rather than the guess it had to be while capture ran at whatever the client drew.
+		return Math.max(1, config.maxManualLength()) * config.captureFps().fps();
 	}
 
 	private void finishClip()

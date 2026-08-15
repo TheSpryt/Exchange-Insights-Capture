@@ -42,7 +42,6 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 	private static final Color MUTED = new Color(0x9E, 0x9E, 0x9E);
 	/** The gold the sibling panels use for their chevrons and view actions. */
 	private static final Color ICON_GOLD = new Color(0xE8, 0xC0, 0x50);
-	private static final String SYSTEM_DEFAULT_MIC = "System default";
 
 	private final ExchangeInsightsCapturePlugin plugin;
 	private final ExchangeInsightsCaptureConfig config;
@@ -53,7 +52,6 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 	private final JPanel modeRow = new JPanel(new GridLayout(1, 3, 4, 0));
 	private final JPanel bindRow = new JPanel();
 	private final JPanel accountRow = new JPanel();
-	private final JPanel micRow = new JPanel();
 	private final ClipListPanel clipList;
 	/** Same component the Bank Templates panel uses, so the two plugins look like a set. */
 	private final SearchBar search = new SearchBar();
@@ -147,15 +145,7 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		// One gap, not three. This was 6 + 14 stacked on top of the leading strut above, so in
 		// Automatic mode - where the bind row renders nothing at all - it left 26 pixels of empty
 		// space between the mode buttons and the clips below.
-		// The microphone picker lives here, not in the config: a @ConfigItem cannot offer a list
-		// that is only known at runtime, and which inputs exist depends on what is plugged in.
-		body.add(Box.createVerticalStrut(6));
-		micRow.setLayout(new BoxLayout(micRow, BoxLayout.Y_AXIS));
-		micRow.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		micRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-		body.add(micRow);
-
-		body.add(Box.createVerticalStrut(8));
+		body.add(Box.createVerticalStrut(14));
 		body.add(sectionLabel("Clips"));
 		body.add(Box.createVerticalStrut(4));
 
@@ -292,60 +282,6 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		});
 	}
 
-	/**
-	 * The microphone row: shown only while recording audio is switched on.
-	 *
-	 * <p>Rebuilt on each refresh so a device plugged in or unplugged while the client is running
-	 * appears or disappears without a restart.
-	 */
-	private void refreshMic()
-	{
-		micRow.removeAll();
-		if (!config.captureMicrophone())
-		{
-			return;
-		}
-
-		micRow.add(sectionLabel("Microphone"));
-		micRow.add(Box.createVerticalStrut(4));
-
-		final java.util.List<String> devices = AudioCapture.devices();
-		if (devices.isEmpty())
-		{
-			final JLabel none = new JLabel("<html>No inputs found.</html>");
-			none.setFont(FontManager.getRunescapeSmallFont());
-			none.setForeground(MUTED);
-			none.setAlignmentX(Component.LEFT_ALIGNMENT);
-			micRow.add(none);
-			return;
-		}
-
-		final javax.swing.JComboBox<String> picker = new javax.swing.JComboBox<>();
-		picker.addItem(SYSTEM_DEFAULT_MIC);
-		devices.forEach(picker::addItem);
-		final String chosen = config.microphoneDevice();
-		picker.setSelectedItem(chosen == null || chosen.isEmpty() ? SYSTEM_DEFAULT_MIC : chosen);
-		styleCombo(picker);
-		picker.setAlignmentX(Component.LEFT_ALIGNMENT);
-		picker.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
-		picker.addActionListener(e ->
-		{
-			final Object sel = picker.getSelectedItem();
-			// Stored blank for the default, so an input that later disappears falls back rather
-			// than pinning the setting to a device that is not there any more.
-			final String want = SYSTEM_DEFAULT_MIC.equals(sel) ? "" : String.valueOf(sel);
-			final String have = config.microphoneDevice() == null ? "" : config.microphoneDevice();
-			// Only on a real change. This row is rebuilt on every panel refresh, and a combo fires
-			// while it is being populated - so writing unconditionally would let a rebuild quietly
-			// reset a chosen device back to the default whenever it was not in the list.
-			if (!want.equals(have))
-			{
-				configManager.setConfiguration(ExchangeInsightsCaptureConfig.GROUP, "microphoneDevice", want);
-			}
-		});
-		micRow.add(picker);
-	}
-
 	/** Called by the plugin as the link flow progresses, so the button reflects it. */
 	void setLinking(boolean value)
 	{
@@ -432,7 +368,6 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		refreshModes();
 		refreshBind();
 		refreshAccount();
-		refreshMic();
 		revalidate();
 		repaint();
 	}

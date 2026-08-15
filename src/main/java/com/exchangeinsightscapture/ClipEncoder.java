@@ -47,25 +47,24 @@ final class ClipEncoder
 
 	static void encode(File out, List<RecordedFrame> frames, int fps) throws IOException
 	{
-		encode(out, frames, fps, ClipQuality.MEDIUM.quantiser(), null, () -> false);
+		encode(out, frames, fps, ClipQuality.MEDIUM.quantiser(), () -> false);
 	}
 
 	/**
 	 * Write the frames to {@code out} as H.264.
 	 *
 	 * @param quantiser lower is better quality and a bigger file; see {@link ClipQuality}.
-	 * @param audioPcm  the soundtrack, or null for a silent clip.
 	 * @param cancelled checked between frames so a cancelled clip stops promptly instead of
 	 *                  finishing an encode nobody wants.
 	 */
 	static void encode(File out, List<RecordedFrame> frames, int fps, int quantiser,
-		byte[] audioPcm, BooleanSupplier cancelled)
+		BooleanSupplier cancelled)
 		throws IOException
 	{
 		if (frames.isEmpty())
 		{
 			throw new IOException("No frames to encode");
 		}
-		H264Writer.write(out, frames, fps, quantiser, audioPcm, cancelled);
+		H264Writer.write(out, frames, fps, quantiser, cancelled);
 	}
 }

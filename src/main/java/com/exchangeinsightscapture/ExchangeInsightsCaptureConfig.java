@@ -86,54 +86,6 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "captureMicrophone",
-		name = "Record microphone",
-		description = "Record your microphone alongside the clip.",
-		section = recordingSection,
-		position = 5
-	)
-	default boolean captureMicrophone()
-	{
-		return false;
-	}
-
-	@ConfigItem(
-		keyName = "microphoneDevice",
-		name = "Microphone",
-		description = "Which input to record. Choose one in the side panel; blank uses your system default.",
-		section = recordingSection,
-		position = 6
-	)
-	default String microphoneDevice()
-	{
-		return "";
-	}
-
-	@ConfigItem(
-		keyName = "captureGameSounds",
-		name = "Record game sounds",
-		description = "Record the game's own sound effects.",
-		section = recordingSection,
-		position = 7
-	)
-	default boolean captureGameSounds()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "captureAreaSounds",
-		name = "Record area sounds",
-		description = "Record ambient and area sound effects as well as your own.",
-		section = recordingSection,
-		position = 8
-	)
-	default boolean captureAreaSounds()
-	{
-		return true;
-	}
-
-	@ConfigItem(
 		keyName = "clipQuality",
 		name = "Quality",
 		description = "Higher looks better and takes noticeably more disk.",

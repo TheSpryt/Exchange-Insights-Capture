@@ -13,6 +13,22 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * A rolling buffer of microphone audio, kept in step with the frame buffer.
  *
+ * <p>NOT WIRED UP. This works - it recorded correctly and muxed in step with the picture - but
+ * clips carrying it would only play in a desktop media player, so it is disconnected until there
+ * is something to compress the audio with. The rest of this note is why, for whoever picks it up.
+ *
+ * <p>JCodec's only audio encoder is raw PCM, so a clip with sound came out as {@code pcm_s16le} in
+ * an MP4. No browser can decode that, and because the track sits in the same file the browser
+ * rejects the WHOLE clip rather than falling back to video alone - a clip with a soundtrack simply
+ * would not play on the website, while the same clip opened fine locally. Uncompressed audio is
+ * also expensive on a storage quota: 48kHz mono is 5.6MB a minute against roughly 0.8MB for the
+ * same thing encoded.
+ *
+ * <p>Reconnecting it needs an encoder browsers accept - AAC-LC is the one that plays everywhere -
+ * plus the matching MP4 sample entry, which JCodec cannot build either (it ships an AAC DECODER
+ * and an {@code EsdsBox}, and no AAC encoder at all). Nothing here has to change when that exists:
+ * this class already hands back exactly the span of samples a clip covers.
+ *
  * <p>Recorded continuously and thrown away continuously, exactly like the video: when a clip is
  * triggered, the seconds leading up to it have to already exist, and there is no way to go back
  * and ask for them.
@@ -21,6 +37,7 @@ import lombok.extern.slf4j.Slf4j;
  * that presents a pair of inputs captures the mic on one channel and silence on the other, which
  * plays back in one ear.
  */
+@SuppressWarnings("unused")
 @Slf4j
 final class AudioCapture
 {

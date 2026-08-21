@@ -30,6 +30,9 @@ public final class Mp4Writer implements Closeable
 	/** Durations are in milliseconds, which is fine for anything up to a few hours. */
 	public static final int TIMESCALE = 1000;
 
+	/** Where 32-bit box lengths and chunk offsets stop being able to describe the file. */
+	private static final long MAX_FILE_BYTES = 0xFFFFFFFFL - (1 << 20);
+
 	private final RandomAccessFile file;
 	private final int width;
 	private final int height;
@@ -84,14 +87,17 @@ public final class Mp4Writer implements Closeable
 	 */
 	public void addFrame(byte[] nal, int durationMs, boolean keyframe) throws IOException
 	{
+		// Box lengths and chunk offsets in this file are 32 bit, so the whole thing has to stay
+		// under 4GB. A clip never comes close, but a long manual recording is only bounded by the
+		// memory limit, and silently truncating an offset would produce a file that looks fine and
+		// plays wrongly. Refusing is far better than that.
+		if (file.getFilePointer() + nal.length > MAX_FILE_BYTES)
+		{
+			throw new IOException("clip is too long to store in this container");
+		}
 		writeInt(nal.length);
 		file.write(nal);
 		samples.add(new int[]{nal.length + 4, Math.max(1, durationMs), keyframe ? 1 : 0});
-	}
-
-	public int frames()
-	{
-		return samples.size();
 	}
 
 	@Override

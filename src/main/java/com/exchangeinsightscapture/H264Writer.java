@@ -68,16 +68,17 @@ final class H264Writer
 		final int chromaStride = (w + 1) / 2;
 		final int[] top = new int[w];
 		final int[] bottom = new int[w];
+		final Rows rows = rowsOf(image, w);
 
 		// A row pair at a time: chroma is averaged over each 2x2 block, so both rows must be in
 		// hand together.
 		for (int y = 0; y < h; y += 2)
 		{
-			image.getRGB(0, y, w, 1, top, 0, w);
+			rows.read(y, top);
 			final boolean hasBottom = y + 1 < h;
 			if (hasBottom)
 			{
-				image.getRGB(0, y + 1, w, 1, bottom, 0, w);
+				rows.read(y + 1, bottom);
 			}
 
 			for (int x = 0; x < w; x += 2)
@@ -110,6 +111,52 @@ final class H264Writer
 				cr[at] = (byte) clamp(crSum / count);
 			}
 		}
+	}
+
+	/** Reads one row of a frame as packed RGB. */
+	private interface Rows
+	{
+		void read(int y, int[] out);
+	}
+
+	/**
+	 * Pick the cheapest way to read rows out of this particular image.
+	 *
+	 * <p>{@code getRGB} goes through the colour model one pixel at a time, which is a real cost
+	 * at nearly a million pixels a frame, fifty times a second. Decoding a JPEG produces
+	 * three-byte BGR, and for that layout the bytes can be read straight out of the raster
+	 * instead. Anything else falls back to the general path, which is always correct and merely
+	 * slower - so an unexpected image type costs speed rather than pixels.
+	 */
+	private static Rows rowsOf(BufferedImage image, int w)
+	{
+		if (image.getType() == BufferedImage.TYPE_3BYTE_BGR
+			&& image.getSampleModel() instanceof java.awt.image.ComponentSampleModel
+			&& image.getRaster().getDataBuffer() instanceof java.awt.image.DataBufferByte)
+		{
+			final java.awt.image.ComponentSampleModel model =
+				(java.awt.image.ComponentSampleModel) image.getSampleModel();
+			final java.awt.image.DataBufferByte buffer =
+				(java.awt.image.DataBufferByte) image.getRaster().getDataBuffer();
+			if (model.getPixelStride() == 3 && buffer.getNumBanks() == 1
+				&& image.getRaster().getMinX() == 0 && image.getRaster().getMinY() == 0)
+			{
+				final byte[] data = buffer.getData();
+				final int scanline = model.getScanlineStride();
+				final int origin = buffer.getOffset();
+				return (y, out) ->
+				{
+					int at = origin + y * scanline;
+					for (int x = 0; x < w; x++, at += 3)
+					{
+						out[x] = ((data[at + 2] & 0xFF) << 16)
+							| ((data[at + 1] & 0xFF) << 8)
+							| (data[at] & 0xFF);
+					}
+				};
+			}
+		}
+		return (y, out) -> image.getRGB(0, y, w, 1, out, 0, w);
 	}
 
 	/**

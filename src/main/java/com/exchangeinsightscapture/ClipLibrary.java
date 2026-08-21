@@ -178,6 +178,56 @@ final class ClipLibrary
 		return null;
 	}
 
+	/** No preview this plugin writes is anywhere near this; a header claiming more is damaged. */
+	private static final int MAX_COVER_PIXELS = 4096;
+
+	/**
+	 * Decode cover art, refusing anything with implausible dimensions.
+	 *
+	 * <p>The size is checked from the header before the image is decoded, not after, because the
+	 * point is to avoid allocating the raster at all. A file in the clips folder is not
+	 * necessarily one this plugin wrote and is not necessarily intact - a truncated write or a
+	 * bad disk can leave a header claiming enormous dimensions, and decoding that would take the
+	 * client down rather than lose a thumbnail.
+	 */
+	private static BufferedImage decodeCover(byte[] cover)
+	{
+		if (cover == null || cover.length == 0)
+		{
+			return null;
+		}
+		try (javax.imageio.stream.ImageInputStream in =
+			ImageIO.createImageInputStream(new java.io.ByteArrayInputStream(cover)))
+		{
+			final java.util.Iterator<javax.imageio.ImageReader> readers = ImageIO.getImageReaders(in);
+			if (!readers.hasNext())
+			{
+				return null;
+			}
+			final javax.imageio.ImageReader reader = readers.next();
+			try
+			{
+				reader.setInput(in);
+				if (reader.getWidth(0) > MAX_COVER_PIXELS || reader.getHeight(0) > MAX_COVER_PIXELS)
+				{
+					log.debug("ignoring a cover image claiming {}x{}",
+						reader.getWidth(0), reader.getHeight(0));
+					return null;
+				}
+				return reader.read(0);
+			}
+			finally
+			{
+				reader.dispose();
+			}
+		}
+		catch (Exception | AssertionError e)
+		{
+			log.debug("could not decode cover art", e);
+			return null;
+		}
+	}
+
 	/** A already-decoded preview, or null if one has not been decoded yet. Never blocks. */
 	static Image cachedPreview(Entry entry)
 	{
@@ -201,10 +251,7 @@ final class ClipLibrary
 		}
 		try
 		{
-			final byte[] cover = Mp4Reader.cover(entry.file);
-			final BufferedImage frame = cover == null
-				? null
-				: ImageIO.read(new java.io.ByteArrayInputStream(cover));
+			final BufferedImage frame = decodeCover(Mp4Reader.cover(entry.file));
 			if (frame != null)
 			{
 				// Cached at panel size, not at capture size. A full frame is a live raster - about
@@ -242,12 +289,7 @@ final class ClipLibrary
 			// Read fresh rather than taken from the cache. The cache holds a panel-sized copy,
 			// and scaling that up to thumbnail size would produce something blurrier than the
 			// image it came from. This runs once per clip, on upload, so a second read is cheap.
-			final byte[] cover = Mp4Reader.cover(entry.file);
-			if (cover == null)
-			{
-				return null;
-			}
-			final Image full = ImageIO.read(new java.io.ByteArrayInputStream(cover));
+			final Image full = decodeCover(Mp4Reader.cover(entry.file));
 			if (full == null)
 			{
 				return null;

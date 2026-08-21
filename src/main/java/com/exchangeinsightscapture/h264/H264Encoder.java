@@ -58,6 +58,18 @@ public final class H264Encoder
 	private final int[][] lumaAc = new int[16][16];
 	private final int[][] chromaAc = new int[8][16];
 
+	/**
+	 * Scratch, reused across macroblocks rather than allocated per macroblock.
+	 *
+	 * <p>A 1310x720 frame is 3690 macroblocks, so at fifty frames a second these were being
+	 * allocated and thrown away around two million times a second. None of them outlive the
+	 * macroblock they are used in, and a frame is encoded on one thread, so one copy each will do.
+	 */
+	private final int[] chromaPred = new int[8];
+	private final int[][] chromaDcLevels = new int[2][4];
+	private final int[] dcScratch = new int[16];
+	private final int[] cdcScratch = new int[4];
+
 	public H264Encoder(int width, int height, int qp)
 	{
 		this.width = width;
@@ -81,16 +93,6 @@ public final class H264Encoder
 		this.nzY = new int[mbWidth * 4 * mbHeight * 4];
 		this.nzU = new int[mbWidth * 2 * mbHeight * 2];
 		this.nzV = new int[nzU.length];
-	}
-
-	public int width()
-	{
-		return width;
-	}
-
-	public int height()
-	{
-		return height;
 	}
 
 	/** The sequence parameter set, as an escaped NAL payload including its header byte. */
@@ -130,7 +132,7 @@ public final class H264Encoder
 		b.u1(1);
 		vui(b, fps);
 		b.trailing();
-		return Bits.escape(b.toBytes(), b.size());
+		return Bits.escape(b.raw(), b.size());
 	}
 
 	/**
@@ -187,7 +189,7 @@ public final class H264Encoder
 		b.u1(0);   // redundant_pic_cnt_present_flag
 
 		b.trailing();
-		return Bits.escape(b.toBytes(), b.size());
+		return Bits.escape(b.raw(), b.size());
 	}
 
 	/** Encode one frame as an IDR, every macroblock I_16x16 with DC prediction. */
@@ -222,7 +224,7 @@ public final class H264Encoder
 		idrPicId = (idrPicId + 1) & 0xFFFF;
 		frameNum = 1;
 		publishReference();
-		return Bits.escape(b.toBytes(), b.size());
+		return Bits.escape(b.raw(), b.size());
 	}
 
 	/** Hand the finished picture to the next frame to predict from. */
@@ -275,10 +277,9 @@ public final class H264Encoder
 		final int cbpLuma = anyLumaAc ? 15 : 0;
 
 		// --- chroma: the same, per component ---
-		final int[] chromaPred = new int[8];
 		boolean anyChromaAc = false;
 		boolean anyChromaDc = false;
-		final int[][] dcPerComponent = new int[2][4];
+		final int[][] dcPerComponent = chromaDcLevels;
 		for (int comp = 0; comp < 2; comp++)
 		{
 			final byte[] src = comp == 0 ? pu : pv;
@@ -374,7 +375,7 @@ public final class H264Encoder
 		final int lx = mbX * 16;
 		final int ly = mbY * 16;
 
-		final int[] dc = new int[16];
+		final int[] dc = dcScratch;
 		System.arraycopy(lumaDc, 0, dc, 0, 16);
 		Transform.hadamard4(dc);
 		for (int i = 0; i < 16; i++)
@@ -407,7 +408,7 @@ public final class H264Encoder
 		for (int comp = 0; comp < 2; comp++)
 		{
 			final byte[] rec = comp == 0 ? ru : rv;
-			final int[] cdc = new int[4];
+			final int[] cdc = cdcScratch;
 			System.arraycopy(dcPerComponent[comp], 0, cdc, 0, 4);
 			Transform.hadamard2(cdc);
 			for (int i = 0; i < 4; i++)
@@ -549,7 +550,7 @@ public final class H264Encoder
 		b.trailing();
 		frameNum = (frameNum + 1) & 15;
 		publishReference();
-		return Bits.escape(b.toBytes(), b.size());
+		return Bits.escape(b.raw(), b.size());
 	}
 
 	/**
@@ -592,7 +593,7 @@ public final class H264Encoder
 			}
 		}
 
-		final int[][] dcPerComponent = new int[2][4];
+		final int[][] dcPerComponent = chromaDcLevels;
 		boolean anyChromaAc = false;
 		boolean anyChromaDc = false;
 		for (int comp = 0; comp < 2; comp++)
@@ -740,7 +741,7 @@ public final class H264Encoder
 		{
 			final byte[] rec = comp == 0 ? ru : rv;
 			final byte[] ref = comp == 0 ? refU : refV;
-			final int[] cdc = new int[4];
+			final int[] cdc = cdcScratch;
 			System.arraycopy(dcPerComponent[comp], 0, cdc, 0, 4);
 			Transform.hadamard2(cdc);
 			for (int i = 0; i < 4; i++)
@@ -769,65 +770,6 @@ public final class H264Encoder
 				}
 			}
 		}
-	}
-
-	/** Encode one frame with every macroblock stored uncompressed. Used to test the framing. */
-	public byte[] encodeIdrPcm(byte[] y, byte[] u, byte[] v)
-	{
-		pad(y, u, v);
-		final Bits b = new Bits();
-		b.u(0x65, 8);
-		b.ue(0);
-		b.ue(7);
-		b.ue(0);
-		b.u(0, 4);
-		b.ue(idrPicId);
-		b.u1(0);
-		b.u1(0);
-		b.se(0);
-		b.ue(1);
-
-		for (int mb = 0; mb < mbWidth * mbHeight; mb++)
-		{
-			final int mbX = mb % mbWidth;
-			final int mbY = mb / mbWidth;
-			b.ue(25); // I_PCM
-			while (!b.aligned())
-			{
-				b.u1(0);
-			}
-			for (int i = 0; i < 256; i++)
-			{
-				b.u(py[(mbY * 16 + i / 16) * paddedWidth + mbX * 16 + i % 16] & 0xFF, 8);
-			}
-			for (int i = 0; i < 64; i++)
-			{
-				b.u(pu[(mbY * 8 + i / 8) * chromaWidth + mbX * 8 + i % 8] & 0xFF, 8);
-			}
-			for (int i = 0; i < 64; i++)
-			{
-				b.u(pv[(mbY * 8 + i / 8) * chromaWidth + mbX * 8 + i % 8] & 0xFF, 8);
-			}
-		}
-		b.trailing();
-		idrPicId = (idrPicId + 1) & 0xFFFF;
-		return Bits.escape(b.toBytes(), b.size());
-	}
-
-	/** The reconstruction, for checking our output against a decoder's. */
-	public byte[][] reconstruction()
-	{
-		return new byte[][]{ry, ru, rv};
-	}
-
-	public int paddedWidth()
-	{
-		return paddedWidth;
-	}
-
-	public int paddedHeight()
-	{
-		return paddedHeight;
 	}
 
 	private void pad(byte[] y, byte[] u, byte[] v)

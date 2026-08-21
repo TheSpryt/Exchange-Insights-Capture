@@ -21,6 +21,9 @@ public final class Mp4Reader
 	/** How far in to look before giving up. The index and cover art live well inside this. */
 	private static final long SEARCH_LIMIT = 4 << 20;
 
+	/** A preview this plugin writes is tens of kilobytes; this is room to spare, not a target. */
+	private static final int MAX_COVER_BYTES = 2 << 20;
+
 	private Mp4Reader()
 	{
 	}
@@ -44,7 +47,9 @@ public final class Mp4Reader
 			}
 			// The data box holds a well-known type and a locale before the image itself.
 			final int length = (int) (found[1] - 16);
-			if (length <= 0 || length > 8 << 20)
+			// Bounded because the file is not necessarily one this plugin wrote - anything can be
+			// dropped into the clips folder, and the answer goes straight to an image decoder.
+			if (length <= 0 || length > MAX_COVER_BYTES)
 			{
 				return null;
 			}
@@ -74,20 +79,23 @@ public final class Mp4Reader
 			{
 				return null;
 			}
-			file.seek(found[0] + 8);
+			// Seeked rather than skipped: skipBytes may move fewer bytes than asked on a
+			// truncated file and reports it in a return value, and reading the next field from
+			// the wrong place would produce a confident, wrong answer.
+			final long at = found[0] + 8;
+			file.seek(at);
 			final int version = file.readUnsignedByte();
-			file.skipBytes(3); // flags
 			final long timescale;
 			final long duration;
 			if (version == 1)
 			{
-				file.skipBytes(16); // creation and modification, both 64 bit here
+				file.seek(at + 4 + 16);
 				timescale = file.readInt() & 0xFFFFFFFFL;
 				duration = file.readLong();
 			}
 			else
 			{
-				file.skipBytes(8); // creation and modification
+				file.seek(at + 4 + 8);
 				timescale = file.readInt() & 0xFFFFFFFFL;
 				duration = file.readInt() & 0xFFFFFFFFL;
 			}
@@ -95,7 +103,10 @@ public final class Mp4Reader
 			{
 				return null;
 			}
-			return (double) duration / timescale;
+			final double seconds = (double) duration / timescale;
+			// A malformed header can claim years. Nothing this plugin records is longer than an
+			// afternoon, and an absurd length would be shown to the user as fact.
+			return seconds > 0 && seconds < 24 * 60 * 60 ? seconds : null;
 		}
 		catch (IOException | RuntimeException e)
 		{

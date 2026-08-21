@@ -72,27 +72,20 @@ public final class Bits
 		}
 	}
 
-	/** True when nothing is half-written, which every NAL boundary requires. */
-	public boolean aligned()
-	{
-		return pending == 0;
-	}
-
 	public int size()
 	{
 		return at;
 	}
 
-	public byte[] toBytes()
+	/**
+	 * The working buffer itself, valid up to {@link #size}.
+	 *
+	 * <p>Handed out rather than copied because the only caller immediately copies it again while
+	 * inserting escape bytes, and a frame is a couple of hundred kilobytes.
+	 */
+	public byte[] raw()
 	{
-		return Arrays.copyOf(buf, at);
-	}
-
-	public void reset()
-	{
-		at = 0;
-		pending = 0;
-		partial = 0;
+		return buf;
 	}
 
 	private void push(byte b)

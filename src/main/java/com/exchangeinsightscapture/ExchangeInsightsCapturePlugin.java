@@ -1,5 +1,6 @@
 package com.exchangeinsightscapture;
 
+import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.awt.image.BufferedImage;
 import java.io.File;
@@ -78,6 +79,12 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	@Inject
 	private OkHttpClient httpClient;
 
+	// The client's Gson, never a fresh one: the hub packager rejects `new Gson()` outright, and the
+	// injected instance carries RuneLite's own type adapters. Call .newBuilder() on it if this ever
+	// needs different settings.
+	@Inject
+	private Gson gson;
+
 	@Inject
 	private ExchangeInsightsCaptureConfig config;
 
@@ -127,7 +134,7 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		uploader = new ClipUploader(config, configManager, httpClient, executor, this::notifyChat);
+		uploader = new ClipUploader(config, configManager, httpClient, executor, this::notifyChat, gson);
 		recorder = new ClipRecorder(config, drawManager, this::canCapture, this::mousePosition,
 			this::onClipSaved, this::onClipError);
 		recorder.setCanvasBounds(this::canvasBoundsOnScreen);

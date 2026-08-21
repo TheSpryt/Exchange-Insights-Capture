@@ -41,11 +41,12 @@ class ClipUploader
 	private final OkHttpClient http;
 	private final ScheduledExecutorService executor;
 	private final Consumer<String> notify;
-	private final Gson gson = new Gson();
+	private final Gson gson;
 
 	ClipUploader(ExchangeInsightsCaptureConfig config, ConfigManager configManager, OkHttpClient http,
-		ScheduledExecutorService executor, Consumer<String> notify)
+		ScheduledExecutorService executor, Consumer<String> notify, Gson gson)
 	{
+		this.gson = gson;
 		this.config = config;
 		this.configManager = configManager;
 		this.http = http;

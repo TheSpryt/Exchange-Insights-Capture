@@ -10,18 +10,20 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
-import org.jcodec.api.awt.AWTFrameGrab;
-import org.jcodec.containers.mp4.demuxer.MP4Demuxer;
-import org.jcodec.common.io.SeekableByteChannel;
-import org.jcodec.common.io.NIOUtils;
-import org.jcodec.common.DemuxerTrack;
+import com.exchangeinsightscapture.h264.Mp4Reader;
+import javax.imageio.ImageIO;
 
 /**
  * The saved-clip library: what is on disk, and a preview frame for each entry.
  *
- * <p>Previews are decoded straight out of the video rather than kept as sidecar files. That
- * costs a frame decode the first time a clip is shown, but it means there is no second set of
- * files to write, rename, delete or leave behind - the clip is the only artefact.
+ * <p>Previews travel inside the clip, as cover art written when it was encoded. There is still
+ * no second set of files to write, rename, delete or leave behind - the clip remains the only
+ * artefact - but reading one back is now a walk through the container rather than a video frame
+ * decode, which is both far cheaper and possible without a decoder at all.
+ *
+ * <p>Clips recorded before this carry no cover art and will show no preview. Nothing can be done
+ * for them: recovering it would mean decoding H.264, which is exactly the dependency that had to
+ * go.
  *
  * <p>Decoding is not free, so results are cached in memory, keyed by path AND modification
  * time so a renamed or overwritten clip can never show a stale image. The cache is bounded:
@@ -167,29 +169,11 @@ final class ClipLibrary
 		{
 			return known;
 		}
-		SeekableByteChannel channel = null;
-		try
+		final Double seconds = Mp4Reader.durationSeconds(entry.file);
+		if (seconds != null && seconds > 0)
 		{
-			channel = NIOUtils.readableChannel(entry.file);
-			final MP4Demuxer demuxer = MP4Demuxer.createMP4Demuxer(channel);
-			for (DemuxerTrack track : demuxer.getTracks())
-			{
-				final org.jcodec.common.DemuxerTrackMeta meta = track.getMeta();
-				if (meta != null && meta.getTotalDuration() > 0)
-				{
-					final Double seconds = meta.getTotalDuration();
-					DURATIONS.put(entry.cacheKey(), seconds);
-					return seconds;
-				}
-			}
-		}
-		catch (Exception | AssertionError e)
-		{
-			log.debug("could not read the length of {}", entry.name, e);
-		}
-		finally
-		{
-			NIOUtils.closeQuietly(channel);
+			DURATIONS.put(entry.cacheKey(), seconds);
+			return seconds;
 		}
 		return null;
 	}
@@ -201,10 +185,12 @@ final class ClipLibrary
 	}
 
 	/**
-	 * Decode this clip's first frame. Slow enough to matter (a full video frame decode), so it
-	 * must not be called on the EDT. Returns null when the frame cannot be read - Motion JPEG
-	 * clips in particular are not decodable by every path - and caches the result either way is
-	 * avoided so a transient failure can be retried.
+	 * This clip's preview, read from the cover art the encoder wrote into it.
+	 *
+	 * <p>Cheap now - a few nested boxes at the front of the file and a small JPEG - but still off
+	 * the EDT, because it is disk work and there may be a page of clips wanting one at once.
+	 * Returns null for a clip with no cover art, which every clip recorded before this has, and
+	 * the result is not cached in that case so a transient read failure can be retried.
 	 */
 	static Image decodePreview(Entry entry)
 	{
@@ -215,7 +201,10 @@ final class ClipLibrary
 		}
 		try
 		{
-			final BufferedImage frame = AWTFrameGrab.getFrame(entry.file, 0);
+			final byte[] cover = Mp4Reader.cover(entry.file);
+			final BufferedImage frame = cover == null
+				? null
+				: ImageIO.read(new java.io.ByteArrayInputStream(cover));
 			if (frame != null)
 			{
 				// Cached at panel size, not at capture size. A full frame is a live raster - about
@@ -232,9 +221,8 @@ final class ClipLibrary
 		}
 		catch (Exception | AssertionError e)
 		{
-			// JCodec throws a variety of things (including AssertionError) on formats it cannot
-			// decode. A missing preview is cosmetic, so it must never propagate.
-			log.debug("could not decode a preview frame for {}", entry.name, e);
+			// A missing preview is cosmetic, so it must never propagate.
+			log.debug("could not read a preview for {}", entry.name, e);
 		}
 		return null;
 	}
@@ -242,19 +230,24 @@ final class ClipLibrary
 	/**
 	 * This clip's preview as a JPEG, ready to upload.
 	 *
-	 * <p>Deliberately the SAME code path the panel displays from - decode frame 0, scale to
-	 * THUMB_WIDTH - so the image stored on the account is byte-for-byte what this client would
-	 * have drawn. There is no second implementation to drift: the server never generates a
-	 * thumbnail, it only keeps the one a client made.
+	 * <p>Deliberately the SAME code path the panel displays from - the clip's own cover art,
+	 * scaled to THUMB_WIDTH - so the image stored on the account is what this client would have
+	 * drawn. There is no second implementation to drift: the server never generates a thumbnail,
+	 * it only keeps the one a client made.
 	 */
 	static byte[] previewJpeg(Entry entry)
 	{
 		try
 		{
-			// Decoded fresh rather than taken from the cache. The cache holds a panel-sized copy,
-			// and scaling that up to thumbnail size would produce something blurrier than the frame
-			// it came from. This runs once per clip, on upload, so a second decode is affordable.
-			final Image full = AWTFrameGrab.getFrame(entry.file, 0);
+			// Read fresh rather than taken from the cache. The cache holds a panel-sized copy,
+			// and scaling that up to thumbnail size would produce something blurrier than the
+			// image it came from. This runs once per clip, on upload, so a second read is cheap.
+			final byte[] cover = Mp4Reader.cover(entry.file);
+			if (cover == null)
+			{
+				return null;
+			}
+			final Image full = ImageIO.read(new java.io.ByteArrayInputStream(cover));
 			if (full == null)
 			{
 				return null;

@@ -34,6 +34,18 @@ public final class H264Encoder
 	private final byte[] ru;
 	private final byte[] rv;
 
+	/**
+	 * The previous frame, as the decoder holds it. Predicted frames are coded against this.
+	 *
+	 * <p>Separate from the working reconstruction because that one is overwritten macroblock by
+	 * macroblock as the current frame is coded, and a predicted macroblock needs the PREVIOUS
+	 * frame at its own position - which the current frame has usually already trampled.
+	 */
+	private final byte[] refY;
+	private final byte[] refU;
+	private final byte[] refV;
+	private int frameNum;
+
 	/** Non-zero coefficient counts per 4x4 block, which drive the entropy coder's context. */
 	private final int[] nzY;
 	private final int[] nzU;
@@ -63,6 +75,9 @@ public final class H264Encoder
 		this.ry = new byte[py.length];
 		this.ru = new byte[pu.length];
 		this.rv = new byte[pv.length];
+		this.refY = new byte[py.length];
+		this.refU = new byte[pu.length];
+		this.refV = new byte[pv.length];
 		this.nzY = new int[mbWidth * 4 * mbHeight * 4];
 		this.nzU = new int[mbWidth * 2 * mbHeight * 2];
 		this.nzV = new int[nzU.length];
@@ -205,7 +220,17 @@ public final class H264Encoder
 
 		b.trailing();
 		idrPicId = (idrPicId + 1) & 0xFFFF;
+		frameNum = 1;
+		publishReference();
 		return Bits.escape(b.toBytes(), b.size());
+	}
+
+	/** Hand the finished picture to the next frame to predict from. */
+	private void publishReference()
+	{
+		System.arraycopy(ry, 0, refY, 0, ry.length);
+		System.arraycopy(ru, 0, refU, 0, ru.length);
+		System.arraycopy(rv, 0, refV, 0, rv.length);
 	}
 
 	private void macroblock(Bits b, int mbX, int mbY)
@@ -446,6 +471,304 @@ public final class H264Encoder
 			return (a + c + 1) >> 1;
 		}
 		return left ? a : top ? c : 0;
+	}
+
+	/**
+	 * coded_block_pattern is coded as a mapped index rather than written directly, because the
+	 * common patterns are not the small numbers. This is the standard inter mapping, inverted:
+	 * pattern to index. Index 0 is pattern 0, so an all-zero macroblock stays cheap.
+	 */
+	private static final int[] CBP_TO_CODE = new int[48];
+
+	static
+	{
+		final int[] codeToCbp = {
+			0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13, 14, 6, 9, 31, 35, 37, 42, 44,
+			33, 34, 36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22,
+			25, 38, 41,
+		};
+		for (int i = 0; i < codeToCbp.length; i++)
+		{
+			CBP_TO_CODE[codeToCbp[i]] = i;
+		}
+	}
+
+	/**
+	 * Encode one frame as a predicted picture, against the frame before it.
+	 *
+	 * <p>Motion vectors are fixed at zero, so a macroblock is predicted from the same position in
+	 * the previous frame and motion compensation is a straight copy - no sub-pixel interpolation
+	 * and no search. That sounds like a severe limitation and is barely one here: a game canvas is
+	 * a still interface over a scene that changes in places, so the parts that do not move are
+	 * exactly the parts that dominate the frame, and each of those costs a single skip. What it
+	 * gives up is panning, where a real motion search would earn its keep.
+	 *
+	 * <p>A macroblock whose residual quantises away entirely is skipped, costing nothing but its
+	 * share of a run length. That is where the saving over coding every frame whole comes from.
+	 */
+	public byte[] encodeP(byte[] y, byte[] u, byte[] v)
+	{
+		pad(y, u, v);
+		java.util.Arrays.fill(nzY, 0);
+		java.util.Arrays.fill(nzU, 0);
+		java.util.Arrays.fill(nzV, 0);
+
+		final Bits b = new Bits();
+		b.u(0x41, 8); // nal_ref_idc 2, type 1: a non-IDR picture that is itself a reference
+		b.ue(0);      // first_mb_in_slice
+		b.ue(5);      // slice_type: P, and every slice in the picture is P
+		b.ue(0);      // pic_parameter_set_id
+		b.u(frameNum & 15, 4);
+		b.u1(0);      // num_ref_idx_active_override_flag
+		b.u1(0);      // ref_pic_list_modification_flag_l0
+		b.u1(0);      // adaptive_ref_pic_marking_mode_flag: sliding window
+		b.se(0);      // slice_qp_delta
+		b.ue(1);      // disable_deblocking_filter_idc: off
+
+		int skipRun = 0;
+		for (int mbY = 0; mbY < mbHeight; mbY++)
+		{
+			for (int mbX = 0; mbX < mbWidth; mbX++)
+			{
+				if (predictedMacroblock(b, mbX, mbY, skipRun))
+				{
+					skipRun = 0;
+				}
+				else
+				{
+					skipRun++;
+				}
+			}
+		}
+		// A run that reaches the end of the picture still has to be declared.
+		if (skipRun > 0)
+		{
+			b.ue(skipRun);
+		}
+
+		b.trailing();
+		frameNum = (frameNum + 1) & 15;
+		publishReference();
+		return Bits.escape(b.toBytes(), b.size());
+	}
+
+	/**
+	 * Code one predicted macroblock, or decide it does not need coding at all.
+	 *
+	 * @return true if it was written, false if it was skipped.
+	 */
+	private boolean predictedMacroblock(Bits b, int mbX, int mbY, int skipRun)
+	{
+		final int lx = mbX * 16;
+		final int ly = mbY * 16;
+		final int cx = mbX * 8;
+		final int cy = mbY * 8;
+
+		// Luma as sixteen ordinary 4x4 blocks - no separate DC, which is an intra-only layout.
+		int cbpLuma = 0;
+		for (int blk = 0; blk < 16; blk++)
+		{
+			final int bx = Macroblocks.BLK_X[blk];
+			final int by = Macroblocks.BLK_Y[blk];
+			for (int j = 0; j < 4; j++)
+			{
+				for (int i = 0; i < 4; i++)
+				{
+					final int at = (ly + by * 4 + j) * paddedWidth + lx + bx * 4 + i;
+					block[j * 4 + i] = (py[at] & 0xFF) - (refY[at] & 0xFF);
+				}
+			}
+			Transform.forward(block);
+			final int[] out = lumaAc[blk];
+			boolean any = false;
+			for (int i = 0; i < 16; i++)
+			{
+				out[i] = Transform.quant(block[i], i, qp);
+				any |= out[i] != 0;
+			}
+			if (any)
+			{
+				cbpLuma |= 1 << (blk / 4);
+			}
+		}
+
+		final int[][] dcPerComponent = new int[2][4];
+		boolean anyChromaAc = false;
+		boolean anyChromaDc = false;
+		for (int comp = 0; comp < 2; comp++)
+		{
+			final byte[] src = comp == 0 ? pu : pv;
+			final byte[] ref = comp == 0 ? refU : refV;
+			for (int blk = 0; blk < 4; blk++)
+			{
+				final int bx = blk & 1;
+				final int by = blk >> 1;
+				for (int j = 0; j < 4; j++)
+				{
+					for (int i = 0; i < 4; i++)
+					{
+						final int at = (cy + by * 4 + j) * chromaWidth + cx + bx * 4 + i;
+						block[j * 4 + i] = (src[at] & 0xFF) - (ref[at] & 0xFF);
+					}
+				}
+				Transform.forward(block);
+				dcPerComponent[comp][by * 2 + bx] = block[0];
+				final int[] ac = chromaAc[comp * 4 + blk];
+				ac[0] = 0;
+				for (int i = 1; i < 16; i++)
+				{
+					ac[i] = Transform.quant(block[i], i, chromaQp);
+					anyChromaAc |= ac[i] != 0;
+				}
+			}
+			Transform.hadamard2(dcPerComponent[comp]);
+			for (int i = 0; i < 4; i++)
+			{
+				dcPerComponent[comp][i] = Transform.quantDc(dcPerComponent[comp][i], chromaQp);
+				anyChromaDc |= dcPerComponent[comp][i] != 0;
+			}
+		}
+		final int cbpChroma = anyChromaAc ? 2 : anyChromaDc ? 1 : 0;
+
+		if (cbpLuma == 0 && cbpChroma == 0)
+		{
+			// Nothing survived the quantiser, so the prediction alone is the answer. A skipped
+			// macroblock reconstructs to exactly that, which is what makes it free.
+			copyFromReference(mbX, mbY);
+			return false;
+		}
+
+		b.ue(skipRun);
+		b.ue(0);  // mb_type 0: P_L0_16x16
+		b.se(0);  // mvd_l0 x
+		b.se(0);  // mvd_l0 y
+		b.ue(CBP_TO_CODE[cbpLuma + 16 * cbpChroma]);
+		b.se(0);  // mb_qp_delta
+
+		for (int idx8x8 = 0; idx8x8 < 4; idx8x8++)
+		{
+			if ((cbpLuma & (1 << idx8x8)) == 0)
+			{
+				continue;
+			}
+			for (int i = 0; i < 4; i++)
+			{
+				final int blk = idx8x8 * 4 + i;
+				final int bx = mbX * 4 + Macroblocks.BLK_X[blk];
+				final int by = mbY * 4 + Macroblocks.BLK_Y[blk];
+				Macroblocks.toZigzag(lumaAc[blk], scan, 0);
+				nzY[by * mbWidth * 4 + bx] = Cavlc.block(b, scan, 16, lumaNc(bx, by));
+			}
+		}
+
+		if (cbpChroma != 0)
+		{
+			for (int comp = 0; comp < 2; comp++)
+			{
+				System.arraycopy(dcPerComponent[comp], 0, chromaDc, 0, 4);
+				Cavlc.block(b, chromaDc, 4, -1);
+			}
+		}
+		if (cbpChroma == 2)
+		{
+			for (int comp = 0; comp < 2; comp++)
+			{
+				final int[] nz = comp == 0 ? nzU : nzV;
+				for (int blk = 0; blk < 4; blk++)
+				{
+					final int bx = mbX * 2 + (blk & 1);
+					final int by = mbY * 2 + (blk >> 1);
+					Macroblocks.toZigzag(chromaAc[comp * 4 + blk], scan, 1);
+					nz[by * mbWidth * 2 + bx] = Cavlc.block(b, scan, 15, chromaNc(nz, bx, by));
+				}
+			}
+		}
+
+		reconstructPredicted(mbX, mbY, cbpLuma, cbpChroma, dcPerComponent);
+		return true;
+	}
+
+	/** A skipped macroblock: the prediction, carried through unchanged. */
+	private void copyFromReference(int mbX, int mbY)
+	{
+		for (int j = 0; j < 16; j++)
+		{
+			final int at = (mbY * 16 + j) * paddedWidth + mbX * 16;
+			System.arraycopy(refY, at, ry, at, 16);
+		}
+		for (int j = 0; j < 8; j++)
+		{
+			final int at = (mbY * 8 + j) * chromaWidth + mbX * 8;
+			System.arraycopy(refU, at, ru, at, 8);
+			System.arraycopy(refV, at, rv, at, 8);
+		}
+	}
+
+	/** Rebuild a predicted macroblock: the reference plus whatever residual survived. */
+	private void reconstructPredicted(int mbX, int mbY, int cbpLuma, int cbpChroma,
+		int[][] dcPerComponent)
+	{
+		final int lx = mbX * 16;
+		final int ly = mbY * 16;
+		for (int blk = 0; blk < 16; blk++)
+		{
+			final int bx = Macroblocks.BLK_X[blk];
+			final int by = Macroblocks.BLK_Y[blk];
+			final boolean coded = (cbpLuma & (1 << (blk / 4))) != 0;
+			if (coded)
+			{
+				for (int i = 0; i < 16; i++)
+				{
+					block[i] = Transform.dequant(lumaAc[blk][i], i, qp);
+				}
+				Transform.inverse(block);
+			}
+			for (int j = 0; j < 4; j++)
+			{
+				for (int i = 0; i < 4; i++)
+				{
+					final int at = (ly + by * 4 + j) * paddedWidth + lx + bx * 4 + i;
+					ry[at] = (byte) Macroblocks.clamp((refY[at] & 0xFF)
+						+ (coded ? block[j * 4 + i] : 0));
+				}
+			}
+		}
+
+		final int cx = mbX * 8;
+		final int cy = mbY * 8;
+		for (int comp = 0; comp < 2; comp++)
+		{
+			final byte[] rec = comp == 0 ? ru : rv;
+			final byte[] ref = comp == 0 ? refU : refV;
+			final int[] cdc = new int[4];
+			System.arraycopy(dcPerComponent[comp], 0, cdc, 0, 4);
+			Transform.hadamard2(cdc);
+			for (int i = 0; i < 4; i++)
+			{
+				cdc[i] = Transform.dequantChromaDc(cdc[i], chromaQp);
+			}
+			for (int blk = 0; blk < 4; blk++)
+			{
+				final int bx = blk & 1;
+				final int by = blk >> 1;
+				block[0] = cbpChroma != 0 ? cdc[by * 2 + bx] : 0;
+				for (int i = 1; i < 16; i++)
+				{
+					block[i] = cbpChroma == 2
+						? Transform.dequant(chromaAc[comp * 4 + blk][i], i, chromaQp)
+						: 0;
+				}
+				Transform.inverse(block);
+				for (int j = 0; j < 4; j++)
+				{
+					for (int i = 0; i < 4; i++)
+					{
+						final int at = (cy + by * 4 + j) * chromaWidth + cx + bx * 4 + i;
+						rec[at] = (byte) Macroblocks.clamp((ref[at] & 0xFF) + block[j * 4 + i]);
+					}
+				}
+			}
+		}
 	}
 
 	/** Encode one frame with every macroblock stored uncompressed. Used to test the framing. */

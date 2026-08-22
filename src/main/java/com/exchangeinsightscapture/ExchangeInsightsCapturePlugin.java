@@ -137,7 +137,6 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 		uploader = new ClipUploader(config, configManager, httpClient, executor, this::notifyChat, gson);
 		recorder = new ClipRecorder(config, drawManager, this::canCapture, this::mousePosition,
 			this::onClipSaved, this::onClipError);
-		recorder.setCanvasBounds(this::canvasBoundsOnScreen);
 		recorder.setPendingListener(this::panelRefreshClips);
 		// Old clips were previewed at 190px; re-send them now the generator makes 1280px ones.
 		uploader.backfillThumbnails();
@@ -672,42 +671,6 @@ public class ExchangeInsightsCapturePlugin extends Plugin
 	 * <p>getLocationOnScreen throws if the component is not showing, which happens routinely
 	 * while the client is starting or minimised - so a null here simply means "skip this tick".
 	 */
-	/**
-	 * Where the game canvas sits on screen, or null when the screen is not safe to copy.
-	 *
-	 * <p>Screen capture copies a rectangle of the desktop, not the game - it has no idea what is
-	 * actually drawn there. So it is only offered while this window is the active one. Alt-tab to
-	 * a browser and that rectangle now contains the browser: the plugin would quietly record
-	 * whatever the player switched to, and put it in a clip they might upload.
-	 *
-	 * <p>Returning null is not a failure. The recorder falls back to asking the client for its own
-	 * rendered frames, which show the game regardless of what is in front of it - slower, but
-	 * correct and private. It also explains the "blank frames" warnings seen on Windows, where
-	 * capture was faithfully recording a minimised or covered window.
-	 */
-	private java.awt.Rectangle canvasBoundsOnScreen()
-	{
-		try
-		{
-			final java.awt.Canvas canvas = client.getCanvas();
-			if (canvas == null || !canvas.isShowing())
-			{
-				return null;
-			}
-			final java.awt.Window window = javax.swing.SwingUtilities.getWindowAncestor(canvas);
-			if (window == null || !window.isActive())
-			{
-				return null;
-			}
-			final java.awt.Point at = canvas.getLocationOnScreen();
-			return new java.awt.Rectangle(at.x, at.y, canvas.getWidth(), canvas.getHeight());
-		}
-		catch (Exception e)
-		{
-			return null;
-		}
-	}
-
 	/**
 	 * Mouse position as a fraction of the canvas (0..1 on each axis), or null if unknown.
 	 *

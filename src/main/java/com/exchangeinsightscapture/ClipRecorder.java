@@ -46,18 +46,12 @@ class ClipRecorder
 {
 	private static final String PART_SUFFIX = ClipStorage.PART_SUFFIX;
 
-	/** How long capture must return nothing but flat colour before Robot is set aside. */
-	private static final long BLANK_MS_BEFORE_FALLBACK = 10_000;
-
-	/** How long to stay on the fallback before giving Robot another chance. */
-	private static final long SCREEN_GRAB_RETRY_MS = 60_000;
-
 	/**
 	 * How many threads compress captured frames.
 	 *
-	 * <p>Fixed rather than scaled to the machine, because a plugin may not ask how many processors
-	 * it has. Two keeps up with the capture rate on anything that can run the game, and leaves the
-	 * renderer alone, which matters more here than finishing a frame sooner.
+	 * <p>Fixed rather than scaled to the machine, because a plugin may not ask how many
+	 * processors it has. Two keeps up with the capture rate on anything that can run the game,
+	 * and leaves the renderer alone, which matters more here than finishing a frame sooner.
 	 */
 	private static final int WORKER_THREADS = 2;
 
@@ -86,14 +80,6 @@ class ClipRecorder
 	private final DrawManager drawManager;
 	private final BooleanSupplier canCapture;
 	private final Supplier<java.awt.geom.Point2D.Double> mousePosition;
-	/** The client canvas' position and size on screen, for the screen-capture source. */
-	private Supplier<java.awt.Rectangle> canvasBounds = () -> null;
-	private java.awt.Robot robot;
-
-	/** Pointer position measured against the last screen grab; null when it was outside. */
-	private volatile java.awt.geom.Point2D.Double screenMouse;
-	/** True when the frame in flight came from the desktop rather than from the renderer. */
-	private volatile boolean lastFrameWasScreen;
 	private final Consumer<File> onSaved;
 	private final Consumer<String> onError;
 	/** Told when a pending clip changes state, so the side panel can redraw it. */
@@ -109,7 +95,7 @@ class ClipRecorder
 
 	private ScheduledExecutorService scheduler;
 	private ThreadPoolExecutor workers;
-	/** Performs the screen grab, off the render thread. */
+	/** Asks the client for frames, off the render thread. */
 	private ThreadPoolExecutor grabber;
 	private Runnable everyFrame;
 	private ThreadPoolExecutor processor;
@@ -299,11 +285,6 @@ class ClipRecorder
 		this.mousePosition = mousePosition;
 		this.onSaved = onSaved;
 		this.onError = onError;
-	}
-
-	void setCanvasBounds(Supplier<java.awt.Rectangle> bounds)
-	{
-		this.canvasBounds = bounds;
 	}
 
 	void setUploadHandler(java.util.function.BiConsumer<File, Boolean> handler)
@@ -613,106 +594,19 @@ class ClipRecorder
 	}
 
 	/**
-	 * Whether Robot may be used for capture at all.
+	 * Ask the client for its next rendered frame.
 	 *
-	 * <p>Turned off permanently for the session once screen capture is shown not to work, because
-	 * the failure is silent. Robot does not throw on Wayland or on macOS without Screen Recording
-	 * permission - it hands back a perfectly valid all-black image - so without this check the
-	 * plugin would cheerfully record black clips and report success.
+	 * <p>This used to copy the client's rectangle off the desktop first and fall back to
+	 * asking the renderer, because a desktop copy is cheap while this forces a readback from
+	 * the GPU. The Plugin Hub does not allow screen capture, so the readback is the only route
+	 * now. It is also the one that cannot see anything outside the game, whatever is sitting in
+	 * front of the window.
 	 */
-	private volatile boolean screenGrabUsable = true;
-
-	/** When the current unbroken run of featureless grabs started, or 0 if there isn't one. */
-	private long blankSinceMs;
-
-	/** When to try Robot again after giving up on it, so a bad guess is not permanent. */
-	private volatile long retryScreenGrabAtMs;
-
-	/**
-	 * Reject a capture that carries no picture, and give up on Robot if they keep coming.
-	 *
-	 * <p>Measured in seconds, not frames. This first counted 30 blank frames in a row, which
-	 * sounds like a lot and is not: capture follows the client, so at 100fps that is a third of a
-	 * second, and a black window while the client is still starting up cleared it easily. It
-	 * misfired on Windows, where screen capture works perfectly.
-	 *
-	 * <p>A broken setup returns black forever, so waiting several seconds costs those users
-	 * nothing, while no loading screen or fade lasts that long. Giving up is also temporary now -
-	 * Robot is retried later - so a wrong guess costs a stretch of slower capture rather than the
-	 * whole session.
-	 */
-	private java.awt.image.BufferedImage checkNotBlank(java.awt.image.BufferedImage shot)
-	{
-		if (shot == null)
-		{
-			return null;
-		}
-		if (!uniform(shot))
-		{
-			blankSinceMs = 0;
-			return shot;
-		}
-
-		final long now = System.currentTimeMillis();
-		if (blankSinceMs == 0)
-		{
-			blankSinceMs = now;
-		}
-		if (now - blankSinceMs < BLANK_MS_BEFORE_FALLBACK)
-		{
-			return shot;
-		}
-
-		log.warn("Screen capture has returned blank frames for {}s; falling back to the client's own "
-				+ "frames and retrying later. On Linux this usually means Wayland, on macOS a missing "
-				+ "Screen Recording permission.", (now - blankSinceMs) / 1000);
-		screenGrabUsable = false;
-		retryScreenGrabAtMs = now + SCREEN_GRAB_RETRY_MS;
-		blankSinceMs = 0;
-		return null;
-	}
-
-	/** True when every sampled pixel matches, which no real frame of the game manages. */
-	private static boolean uniform(java.awt.image.BufferedImage image)
-	{
-		final int w = image.getWidth();
-		final int h = image.getHeight();
-		if (w < 8 || h < 8)
-		{
-			return false;
-		}
-		final int first = image.getRGB(0, 0);
-		for (int y = 0; y < 8; y++)
-		{
-			for (int x = 0; x < 8; x++)
-			{
-				if (image.getRGB(x * (w - 1) / 7, y * (h - 1) / 7) != first)
-				{
-					return false;
-				}
-			}
-		}
-		return true;
-	}
-
-	/** Grab thread: copy the client's rectangle, off the render loop. */
 	private void grabAndProcess()
 	{
 		try
 		{
-			final java.awt.Image shot = grabScreen();
-			if (shot != null)
-			{
-				lastFrameWasScreen = true;
-				onFrameImage(shot);
-			}
-			else
-			{
-				// Not grabbable right now (minimised, not showing): ask the client for its own
-				// frame instead, so capture does not simply stop.
-				lastFrameWasScreen = false;
-				drawManager.requestNextFrameListener(this::onFrameImage);
-			}
+			drawManager.requestNextFrameListener(this::onFrameImage);
 		}
 		catch (Exception e)
 		{
@@ -739,34 +633,6 @@ class ClipRecorder
 	}
 
 	/**
-	 * Where the pointer sits inside {@code bounds}, as a 0-1 fraction, or null when it is
-	 * outside the captured area entirely - in which case no marker should be drawn at all.
-	 */
-	private static java.awt.geom.Point2D.Double mouseWithin(java.awt.Rectangle bounds)
-	{
-		try
-		{
-			final java.awt.PointerInfo info = java.awt.MouseInfo.getPointerInfo();
-			if (info == null)
-			{
-				return null;
-			}
-			final java.awt.Point at = info.getLocation();
-			final double fx = (at.x - bounds.x) / (double) bounds.width;
-			final double fy = (at.y - bounds.y) / (double) bounds.height;
-			if (fx < 0 || fx > 1 || fy < 0 || fy > 1)
-			{
-				return null;
-			}
-			return new java.awt.geom.Point2D.Double(fx, fy);
-		}
-		catch (Exception e)
-		{
-			return null;
-		}
-	}
-
-	/**
 	 * The rate a clip was actually captured at, measured from its own frame timestamps.
 	 *
 	 * <p>There is no configured rate to encode at any more, and frames are skipped whenever a
@@ -785,52 +651,6 @@ class ClipRecorder
 			return 30;
 		}
 		return Math.max(1, Math.min(240, (int) Math.round((clip.size() - 1) * 1000.0 / span)));
-	}
-
-	/**
-	 * Copy the client's on-screen rectangle straight from the desktop.
-	 *
-	 * <p>Runs on the capture thread, so the cost lands here rather than on the renderer. Null
-	 * when the window is not showing or the OS refuses the grab, in which case the tick is
-	 * simply skipped.
-	 */
-	private java.awt.Image grabScreen()
-	{
-		try
-		{
-			final java.awt.Rectangle bounds = canvasBounds.get();
-			if (bounds == null || bounds.width <= 0 || bounds.height <= 0)
-			{
-				return null;
-			}
-			if (!screenGrabUsable)
-			{
-				// Whatever made capture blank may be gone - the window was minimised, or a
-				// permission was granted - so try again occasionally rather than writing off
-				// the fast path for the rest of the session on one bad stretch.
-				if (System.currentTimeMillis() < retryScreenGrabAtMs)
-				{
-					return null;
-				}
-				screenGrabUsable = true;
-			}
-			if (robot == null)
-			{
-				robot = new java.awt.Robot();
-			}
-			// The exact rectangle is known here, so the real pointer position maps straight into
-			// it - no canvas coordinate space to translate and no stretched-mode correction, which
-			// is where the marker used to drift. Robot does not capture the cursor itself (the OS
-			// composites it separately), so it still has to be drawn.
-			screenMouse = mouseWithin(bounds);
-			final java.awt.image.BufferedImage shot = robot.createScreenCapture(bounds);
-			return checkNotBlank(shot);
-		}
-		catch (Exception | AWTError e)
-		{
-			log.debug("screen capture failed", e);
-			return null;
-		}
 	}
 
 	/**
@@ -869,8 +689,7 @@ class ClipRecorder
 		final long now = System.currentTimeMillis();
 		// Read the mouse position on the render thread; the OS cursor is not part
 		// of the captured frame, so we draw our own marker at this point.
-		final java.awt.geom.Point2D.Double mouse = !config.drawCursor() ? null
-			: lastFrameWasScreen ? screenMouse : mousePosition.get();
+		final java.awt.geom.Point2D.Double mouse = config.drawCursor() ? mousePosition.get() : null;
 		w.execute(() -> processFrame(image, now, mouse));
 	}
 

@@ -12,6 +12,12 @@ package com.exchangeinsightscapture;
  * for a difference nobody can see on a replay. The memory ceiling absorbed that by dropping the
  * oldest frames, which quietly shortened the lead-up that is the whole point of a replay buffer.
  *
+ * <p>Since capture moved to the renderer, this setting also decides how much the game gives up.
+ * Every requested frame costs a synchronous readback from the GPU plus a million-pixel conversion,
+ * on the client's own draw, and none of it happens for a frame nobody asked for - so the cost is
+ * linear in this number. Measured on a machine that runs the game comfortably: 60 is affordable,
+ * and 120 takes around 80fps off the game. That is why the highest setting says so.
+ *
  * <p>Public for the same reason {@link ClipQuality} is: RuneLite implements the config interface
  * with a dynamic proxy, and a proxy cannot reach a package-private type.
  */
@@ -23,7 +29,10 @@ public enum ClipFramerate
 	FPS_50(50),
 	/** Matches an ordinary display's refresh, for slightly smoother playback than the game runs. */
 	FPS_60(60),
-	/** For high-refresh monitors. Costs twice 60 in memory, encode time and disk. */
+	/**
+	 * For high-refresh monitors, and expensive: twice 60 in memory, encode time and disk, and
+	 * enough readback to cost the game most of its own framerate.
+	 */
 	FPS_120(120);
 
 	private final int fps;
@@ -52,6 +61,7 @@ public enum ClipFramerate
 	@Override
 	public String toString()
 	{
-		return fps + " FPS";
+		// The cost of the top setting is not guessable from the number, so the menu says it.
+		return fps + (this == FPS_120 ? " FPS (heavy)" : " FPS");
 	}
 }

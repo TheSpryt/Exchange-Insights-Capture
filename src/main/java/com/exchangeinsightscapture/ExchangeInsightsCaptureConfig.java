@@ -88,8 +88,9 @@ public interface ExchangeInsightsCaptureConfig extends Config
 	@ConfigItem(
 		keyName = "captureFps",
 		name = "Framerate",
-		description = "Frames a second to capture. A ceiling: clips can never run faster than the "
-			+ "client draws, and a lower one costs less memory, disk and encoding time.",
+		description = "Frames a second to capture. A ceiling: clips never run faster than the client "
+			+ "draws. Each captured frame is read back from the GPU, so this also costs game "
+			+ "framerate - 60 is affordable, 120 is not on most machines.",
 		section = recordingSection,
 		position = 2
 	)

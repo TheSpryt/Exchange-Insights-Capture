@@ -1,6 +1,5 @@
 package com.exchangeinsightscapture;
 
-import java.awt.AWTError;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.Image;

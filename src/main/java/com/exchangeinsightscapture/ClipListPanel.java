@@ -527,25 +527,6 @@ class ClipListPanel extends JPanel
 
 		meta.add(Box.createHorizontalGlue());
 
-		// Only for clips that exist on this machine - there is nothing to show in a file
-		// manager for one that lives only on the account.
-		if (entry.isLocal())
-		{
-			final JLabel show = new JLabel(new SyncIcon(SyncIcon.Kind.REVEAL, true));
-			show.setToolTipText("Copy this clip's file path");
-			show.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-			show.addMouseListener(new java.awt.event.MouseAdapter()
-			{
-				@Override
-				public void mouseClicked(java.awt.event.MouseEvent e)
-				{
-					copyPath(entry.local);
-				}
-			});
-			meta.add(show);
-			meta.add(Box.createHorizontalStrut(5));
-		}
-
 		// Uploaded -> cloud. Local-only -> an upload arrow, which becomes a cloud once the
 		// account listing confirms the upload rather than optimistically on send.
 		final JLabel cloud = new JLabel(entry.isUploaded()

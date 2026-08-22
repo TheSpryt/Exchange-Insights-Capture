@@ -752,15 +752,6 @@ class ExchangeInsightsCapturePanel extends PluginPanel
 		return String.format("%d:%02d", seconds / 60, seconds % 60);
 	}
 
-	private static JLabel title(String text)
-	{
-		final JLabel l = new JLabel(text);
-		l.setFont(FontManager.getRunescapeBoldFont());
-		l.setForeground(Color.WHITE);
-		l.setAlignmentX(Component.LEFT_ALIGNMENT);
-		return l;
-	}
-
 	private static JLabel sectionLabel(String text)
 	{
 		final JLabel l = new JLabel(text);

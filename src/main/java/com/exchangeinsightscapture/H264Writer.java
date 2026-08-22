@@ -44,6 +44,15 @@ final class H264Writer
 	/** How wide the preview carried inside the clip is. Enough for the side panel, and cheap. */
 	private static final int THUMBNAIL_WIDTH = 640;
 
+	/**
+	 * How many threads decode buffered frames ahead of the encoder.
+	 *
+	 * <p>Fixed rather than scaled to the machine, because a plugin may not ask how many processors
+	 * it has. Three keeps the encoder fed - it spends far longer on a frame than a JPEG decode
+	 * takes - without taking the machine over while someone is still playing.
+	 */
+	private static final int DECODE_THREADS = 3;
+
 	private H264Writer()
 	{
 	}
@@ -224,7 +233,7 @@ final class H264Writer
 		// Decoding the buffered JPEG is independent per frame, so it runs ahead on a small pool
 		// while the encoder works. Bounded look-ahead: enough to keep the encoder fed, not so much
 		// that a long clip holds hundreds of full-size decoded frames at once.
-		final int workers = Math.max(2, Math.min(6, Runtime.getRuntime().availableProcessors() / 3));
+		final int workers = DECODE_THREADS;
 		final java.util.concurrent.ExecutorService pool =
 			java.util.concurrent.Executors.newFixedThreadPool(workers, r ->
 			{
@@ -284,7 +293,9 @@ final class H264Writer
 		}
 		catch (InterruptedException e)
 		{
-			Thread.currentThread().interrupt();
+			// Not re-flagged on this thread: setting the interrupt is itself off limits, and the
+			// encode is abandoned either way.
+			log.debug("encode interrupted", e);
 		}
 		catch (java.util.concurrent.ExecutionException e)
 		{
@@ -292,7 +303,9 @@ final class H264Writer
 		}
 		finally
 		{
-			pool.shutdownNow();
+			// shutdown, not shutdownNow: the latter interrupts, which is not allowed. Anything
+			// still queued is a single frame decode, so the wait is milliseconds.
+			pool.shutdown();
 		}
 	}
 }

@@ -532,14 +532,14 @@ class ClipListPanel extends JPanel
 		if (entry.isLocal())
 		{
 			final JLabel show = new JLabel(new SyncIcon(SyncIcon.Kind.REVEAL, true));
-			show.setToolTipText("Show this clip in your file manager");
+			show.setToolTipText("Copy this clip's file path");
 			show.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 			show.addMouseListener(new java.awt.event.MouseAdapter()
 			{
 				@Override
 				public void mouseClicked(java.awt.event.MouseEvent e)
 				{
-					FileReveal.reveal(entry.local);
+					copyPath(entry.local);
 				}
 			});
 			meta.add(show);
@@ -701,14 +701,14 @@ class ClipListPanel extends JPanel
 				});
 			});
 		}
-		image.setToolTipText("Click to open this clip");
+		image.setToolTipText("Click to copy this clip's file path");
 		image.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 		image.addMouseListener(new java.awt.event.MouseAdapter()
 		{
 			@Override
 			public void mouseClicked(java.awt.event.MouseEvent e)
 			{
-				open(entry.local);
+				copyPath(entry.local);
 			}
 		});
 		return image;
@@ -835,21 +835,28 @@ class ClipListPanel extends JPanel
 		onChanged.run();
 	}
 
-	private void open(java.io.File file)
+	/**
+	 * Put a clip's path on the clipboard, to paste into a player or a file manager.
+	 *
+	 * <p>This used to open the clip, and before that open a file manager with it selected. Both
+	 * are gone: the Plugin Hub does not allow a plugin to launch anything, whether through
+	 * Desktop, through LinkBrowser::open or by running a command. Handing over the path is what
+	 * is left, and it at least saves hunting through the folders clips are filed into.
+	 */
+	private void copyPath(java.io.File file)
 	{
-		// Hand off to the OS player rather than trying to play video in a Swing panel.
+		if (file == null)
+		{
+			return;
+		}
 		try
 		{
-			if (file != null && file.isFile())
-			{
-				// RuneLite's opener, not Desktop: it already handles the per-platform differences,
-				// and Desktop is simply absent on a lot of Linux desktops.
-				net.runelite.client.util.LinkBrowser.open(file.getAbsolutePath());
-			}
+			java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(
+				new java.awt.datatransfer.StringSelection(file.getAbsolutePath()), null);
 		}
 		catch (Exception e)
 		{
-			log.debug("could not open clip {}", file, e);
+			log.debug("could not copy the path of {}", file, e);
 		}
 	}
 

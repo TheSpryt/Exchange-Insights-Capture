@@ -52,6 +52,15 @@ class ClipRecorder
 	/** How long to stay on the fallback before giving Robot another chance. */
 	private static final long SCREEN_GRAB_RETRY_MS = 60_000;
 
+	/**
+	 * How many threads compress captured frames.
+	 *
+	 * <p>Fixed rather than scaled to the machine, because a plugin may not ask how many processors
+	 * it has. Two keeps up with the capture rate on anything that can run the game, and leaves the
+	 * renderer alone, which matters more here than finishing a frame sooner.
+	 */
+	private static final int WORKER_THREADS = 2;
+
 	private static final long COOLDOWN_MS = 1500;
 	private static final long EVICT_SLACK_MS = 750;
 	/** If a requested frame never arrives (client not rendering), re-arm after this long. */
@@ -308,7 +317,7 @@ class ClipRecorder
 		grabber = singleThread("instant-replay-grab");
 		// Scale + JPEG for several frames at once. Capped well below the core count: this runs
 		// alongside the game, and the goal is to stop frames queueing, not to hog the CPU.
-		final int poolSize = Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 4));
+		final int poolSize = WORKER_THREADS;
 		workers = (ThreadPoolExecutor) Executors.newFixedThreadPool(poolSize, r -> namedDaemon(r, "instant-replay-worker"));
 		processor = singleThread("instant-replay-processor");
 		encoder = singleThread("instant-replay-encoder");
@@ -611,24 +620,13 @@ class ClipRecorder
 	 * permission - it hands back a perfectly valid all-black image - so without this check the
 	 * plugin would cheerfully record black clips and report success.
 	 */
-	private volatile boolean screenGrabUsable = !isWayland();
+	private volatile boolean screenGrabUsable = true;
 
 	/** When the current unbroken run of featureless grabs started, or 0 if there isn't one. */
 	private long blankSinceMs;
 
 	/** When to try Robot again after giving up on it, so a bad guess is not permanent. */
 	private volatile long retryScreenGrabAtMs;
-
-	/**
-	 * Wayland does not let an application screenshot the desktop through X11 APIs, and Robot has
-	 * no way to say so - it just returns black. Detected up front rather than by symptom.
-	 */
-	private static boolean isWayland()
-	{
-		final String session = System.getenv("XDG_SESSION_TYPE");
-		return (session != null && session.toLowerCase().contains("wayland"))
-			|| System.getenv("WAYLAND_DISPLAY") != null;
-	}
 
 	/**
 	 * Reject a capture that carries no picture, and give up on Robot if they keep coming.
@@ -1347,11 +1345,18 @@ class ClipRecorder
 		return t;
 	}
 
+	/**
+	 * Stop an executor without interrupting it.
+	 *
+	 * <p>shutdownNow interrupts whatever is running, which a plugin may not do. Every task here is
+	 * short - a frame compress, a buffer trim - so letting them finish costs milliseconds, and the
+	 * threads are daemons and will not hold the client open regardless.
+	 */
 	private static void shutdown(java.util.concurrent.ExecutorService service)
 	{
 		if (service != null)
 		{
-			service.shutdownNow();
+			service.shutdown();
 		}
 	}
 }

@@ -14,9 +14,9 @@ save a clip on demand.
   `DrawManager` and held in a rolling buffer as JPEG-compressed bytes, so memory
   stays bounded even with several seconds retained.
 - When a trigger fires, the buffered lead-up is combined with a short
-  post-event tail and encoded to an `.mp4` on a background thread using
-  [JCodec](http://jcodec.org/) — a pure-Java H.264 encoder, so **no native
-  binaries or external processes are required**.
+  post-event tail and encoded to an `.mp4` on a background thread. The H.264
+  encoder and the MP4 container are both part of this plugin, so it has **no
+  third-party dependencies, no native binaries and no external processes**.
 
 ## Configuration
 
@@ -65,29 +65,21 @@ On the **GPU** and **117HD** renderers that requires reading pixels back from
 the GPU, which stalls the render pipeline — so capture rate has a direct and
 sometimes large cost in in-game FPS.
 
-**Framerate is the dial that matters.** Cost scales roughly linearly with it:
-capturing at 60fps is four times the readback cost of 15fps. If your FPS drops,
-lower it first. 15fps is smooth enough for replay clips; above 30 gets expensive
-regardless of how fast your machine is.
+**Framerate is the dial that matters.** A frame nobody asks for costs nothing,
+so the total is linear in this setting. Measured on a machine that runs the game
+comfortably: 60 is affordable, and 120 takes around 80fps off the game. If your
+FPS drops, lower this before anything else.
 
-Secondary levers, in rough order of effect:
+The cost also scales with display scaling, not just canvas size. On a monitor at
+150% the readback is more than twice the size for the same window.
 
-- **Capture source** — "Screen region" copies the client's area of the desktop
-  off the render thread, so the game is never blocked waiting for the frame.
-  Much cheaper than "Game frame", at the cost of capturing anything overlapping
-  the window.
-- **Clip length** — sets how many frames are held in memory at once.
-- **JPEG buffer quality** — trades clip quality for memory and CPU.
+Secondary levers:
+
+- **Clip length** sets how many frames are held in memory at once.
+- **Quality** trades clip size and encoding time against how the clip looks.
 
 The plugin keeps at most one frame request outstanding at a time, so it will not
 pile up requests and make a struggling client worse.
-
-## Building
-
-```
-./gradlew build          # compile + assemble
-./gradlew run            # launch a dev client with the plugin side-loaded
-```
 
 ## Changelog
 
